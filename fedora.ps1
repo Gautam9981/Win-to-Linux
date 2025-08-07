@@ -1,14 +1,21 @@
-# Fedora Prep Script: Shrinks C: by 155GB, creates FAT32 partition for ISO contents, outputs Grub2Win config
+# Fedora Prep Script: Shrinks C: by user-specified amount, creates FAT32 partition for ISO contents, outputs Grub2Win config
 # Run as Administrator
 
 # === CONFIG ===
 $volumeLabel = "VENTOY"
 $isoPartitionSizeGB = 5
-$linuxSpaceGB = 150
+
+# Prompt user for Linux space to shrink
+$linuxSpaceGB = Read-Host "Enter how many GB to shrink C: for Linux space (e.g., 150)"
+if (-not ($linuxSpaceGB -as [int])) {
+    Write-Error "Invalid input. Please enter a number."
+    exit 1
+}
+$linuxSpaceGB = [int]$linuxSpaceGB
 $totalShrinkGB = $linuxSpaceGB + $isoPartitionSizeGB
 $fat32PartitionSizeMB = $isoPartitionSizeGB * 1024
 
-# === 1. Shrink C: Drive ===
+# === Shrink C: Drive ===
 Write-Host "Shrinking C: by $totalShrinkGB GB..."
 $cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
 if (-not $cPartition) { Write-Error "C: drive not found."; exit 1 }
@@ -19,7 +26,7 @@ if ($volume.SizeRemaining -lt ($totalShrinkGB * 1GB)) { Write-Error "Not enough 
 Resize-Partition -DriveLetter 'C' -Size $newSize -ErrorAction Stop
 Write-Host "C: shrunk successfully."
 
-# === 1.5. Wait for Unallocated Space ===
+# === Wait for Unallocated Space ===
 $disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
 if (-not $disk) { Write-Error "System disk not found."; exit 1 }
 Write-Host "Waiting for unallocated space..."
@@ -36,23 +43,23 @@ while ($count -lt $maxRetries) {
 if (-not $ready) { Write-Error "Timeout waiting for unallocated space."; exit 1 }
 Write-Host "Unallocated space ready."
 
-# === 2. Create FAT32 Partition ===
+# === Create FAT32 Partition ===
 Write-Host "Creating FAT32 partition..."
 $part = New-Partition -DiskNumber $disk.Number -Size ($fat32PartitionSizeMB * 1MB) -AssignDriveLetter
 Format-Volume -Partition $part -FileSystem FAT32 -NewFileSystemLabel $volumeLabel -Confirm:$false
 $newDrive = ($part | Get-Volume).DriveLetter + ":"
 
-# === 3. Final Instructions ===
+# === Final Instructions ===
 $instructions = @"
 ==============================================
-Manual Steps: Copy Fedora ISO Files + setting up Grub2Win
+Manual Steps: Copy Fedora ISO Files + Setup Grub2Win
 ==============================================
 Part 1: Getting Grub2Win
 1. Download the files for Grub2Win: https://sourceforge.net/projects/grub2win/files/latest/download
 2. Extract the files
-3. Once extracted, run the installer
+3. Run the installer
 
-Part 2
+Part 2:
 1. Manually extract or mount your Fedora ISO.
 
 2. Copy **all contents** of the ISO (not the ISO file itself) to the new FAT32 partition:

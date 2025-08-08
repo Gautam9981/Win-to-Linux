@@ -1,7 +1,7 @@
 # Ubuntu / Fedora Prep Script for Grub2Win
 # Run as Administrator
 # NOTE: YOU NEED TO DOWNLOAD THE ISO BEFOREHAND!!!
-# This script creates a partition that will enable you to enter the live environment of the distro without a USB, using Grub2Win
+# This script creates a partition that will enable you to enter the live environment of the distro without a USB, using Grub2Win (You will need to disable secure boot!!!)
 
 # === Select Distro ===
 $distro = Read-Host "Enter distro (ubuntu or fedora)"
@@ -107,5 +107,6 @@ Write-Host "=============================================="
 Write-Host "1. Open Grub2Win → Manage Boot Menu → Add New Entry → Custom Code"
 Write-Host "2. Paste above code, adjust (hd0,gptX) if needed."
 Write-Host "3. Save & reboot."
+
 
 

@@ -232,31 +232,31 @@ else
     exit 1
 fi
 
-echo "Filesystem extracted."
+# Bind mount necessary filesystems for chroot
+for fs in proc sys dev; do
+    mount --bind /$fs /mnt/target/$fs
+done
 
-# Install GRUB bootloader
+# Setup chroot environment (resolv.conf, hostname)
+cp /etc/resolv.conf /mnt/target/etc/resolv.conf || true
+echo "$TARGET_DISTRO" > /mnt/target/etc/hostname || true
+
+# Install GRUB bootloader and generate config
 
 echo "Installing GRUB bootloader..."
 
 if [[ "$FIRMWARE" == "uefi" ]]; then
-    # Mount necessary pseudo filesystems for chroot
-    for fs in proc sys dev; do
-        mount --bind /$fs /mnt/target/$fs
-    done
-
     echo "Installing GRUB EFI..."
     chroot /mnt/target grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy
 
     echo "Generating GRUB config..."
     chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
-
-    # Unmount pseudo filesystems
-    for fs in proc sys dev; do
-        umount /mnt/target/$fs
-    done
 else
     echo "Installing GRUB BIOS..."
     grub-install --boot-directory=/mnt/target/boot "$DISK"
+
+    echo "Generating GRUB config inside chroot..."
+    chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
 
     echo ""
     echo "IMPORTANT:"
@@ -265,14 +265,13 @@ else
     echo ""
 fi
 
-# Cleanup
+# Cleanup mounts
+for fs in proc sys dev; do
+    umount /mnt/target/$fs
+done
 
-echo "Cleaning up mounts..."
-umount /mnt/target/boot/efi 2>/dev/null || true
-umount /mnt/target 2>/dev/null || true
 umount "$ISO_MOUNT"
-rmdir "$ISO_MOUNT" 2>/dev/null || true
+umount /mnt/target/boot/efi 2>/dev/null || true
+umount /mnt/target
 
-echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
-
-exit 0
+echo "Migration complete! Reboot to boot into your new $TARGET_DISTRO system."

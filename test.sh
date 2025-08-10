@@ -65,23 +65,61 @@ FIRMWARE=$(detect_firmware)
 echo "Detected firmware: $FIRMWARE"
 
 install_deps() {
-    echo "Detecting package manager..."
+    echo "Detecting package manager and installing dependencies..."
 
     if command -v apt-get >/dev/null 2>&1; then
-        echo "Using apt-get"
+        echo "Using apt-get (Debian/Ubuntu/Mint)"
         apt-get update
-        apt-get install -y curl rsync squashfs-tools parted dosfstools e2fsprogs || exit 1
+
+        BASE_PKGS=(
+            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
+        )
+        GRUB_PKGS=(grub-common grub-pc)
+        if [[ "$FIRMWARE" == "uefi" ]]; then
+            GRUB_PKGS+=(grub-efi-amd64 shim-signed)
+        fi
+
+        apt-get install -y "${BASE_PKGS[@]}" "${GRUB_PKGS[@]}" || {
+            echo "ERROR: Failed to install dependencies with apt-get"
+            exit 1
+        }
+
     elif command -v dnf >/dev/null 2>&1; then
-        echo "Using dnf"
-        dnf install -y curl rsync squashfs-tools grub2 parted dosfstools e2fsprogs || exit 1
+        echo "Using dnf (Fedora)"
+        BASE_PKGS=(
+            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
+            grub2 grub2-tools efibootmgr shim
+        )
+        dnf install -y "${BASE_PKGS[@]}" || {
+            echo "ERROR: Failed to install dependencies with dnf"
+            exit 1
+        }
+
     elif command -v pacman >/dev/null 2>&1; then
-        echo "Using pacman"
-        pacman -Sy --noconfirm curl rsync squashfs-tools grub parted dosfstools e2fsprogs || exit 1
+        echo "Using pacman (Arch)"
+        BASE_PKGS=(
+            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
+            grub efibootmgr
+        )
+        pacman -Sy --noconfirm "${BASE_PKGS[@]}" || {
+            echo "ERROR: Failed to install dependencies with pacman"
+            exit 1
+        }
+
     elif command -v xbps-install >/dev/null 2>&1; then
-        echo "Using xbps-install"
-        xbps-install -Sy curl rsync squashfs-tools grub parted dosfstools e2fsprogs || exit 1
+        echo "Using xbps-install (Void Linux)"
+        BASE_PKGS=(
+            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
+            grub efibootmgr
+        )
+        xbps-install -Sy "${BASE_PKGS[@]}" || {
+            echo "ERROR: Failed to install dependencies with xbps-install"
+            exit 1
+        }
+
     else
-        echo "ERROR: No supported package manager found."
+        echo "ERROR: No supported package manager found to install dependencies."
+        echo "Please install required packages manually."
         exit 1
     fi
 }
@@ -210,13 +248,13 @@ chroot /mnt/target /bin/bash -c "
 set -e
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y grub-common grub-pc grub-efi shim-signed || true
+    apt-get install -y grub-common grub-pc grub-efi-amd64 shim-signed || true
 elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y grub2 shim || true
+    dnf install -y grub2 shim efibootmgr || true
 elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm grub efibootmgr || true
 elif command -v xbps-install >/dev/null 2>&1; then
-    xbps-install -Sy grub || true
+    xbps-install -Sy grub efibootmgr || true
 fi
 
 if [[ \"$FIRMWARE\" == \"uefi\" ]]; then

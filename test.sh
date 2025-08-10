@@ -4,10 +4,10 @@ set -euo pipefail
 ##############################
 # Migration Script Usage:
 #
-# Run as root (sudo ./migrate.sh --to <distro> --disk <disk> [--partitions <partitions>] [--erase whole|partitions] [--download-dir <dir>])
+# Run as root:
+#   sudo ./migrate.sh --to <distro> --disk <disk> [--partitions <partitions>] [--erase whole|partitions] [--download-dir <dir>] [--root-partition <dev>] [--efi-partition <dev>]
+#
 # Supported distros: fedora, ubuntu, mint, arch, void
-# --erase: 'whole' erases entire disk, 'partitions' erases only specified partitions
-# --partitions: comma-separated list of partitions (e.g. /dev/sda1,/dev/sda2) - required if --erase partitions
 ##############################
 
 # Ensure running as root
@@ -20,8 +20,10 @@ fi
 TARGET_DISTRO=""
 TARGET_DISK=""
 DOWNLOAD_DIR="/root/Downloads"
-ERASE_MODE="whole"   # default to erase entire disk
+ERASE_MODE="whole"
 PARTITIONS_TO_ERASE=""
+ROOT_PARTITION=""
+EFI_PARTITION=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -30,6 +32,8 @@ while [[ $# -gt 0 ]]; do
         --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
         --erase) ERASE_MODE="${2,,}"; shift 2 ;;
         --partitions) PARTITIONS_TO_ERASE="$2"; shift 2 ;;
+        --root-partition) ROOT_PARTITION="$2"; shift 2 ;;
+        --efi-partition) EFI_PARTITION="$2"; shift 2 ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
 done
@@ -66,73 +70,29 @@ install_deps() {
     if command -v apt-get >/dev/null 2>&1; then
         echo "Using apt-get"
         apt-get update
-
-        apt-get install -y curl rsync squashfs-tools parted dosfstools e2fsprogs || {
-            echo "ERROR: Failed installing basic dependencies."
-            exit 1
-        }
-
-        if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
-            echo "Installing grub EFI/BIOS packages for $TARGET_DISTRO"
-
-            if [[ "$FIRMWARE" == "uefi" ]]; then
-                # Try installing grub EFI packages carefully due to known issues
-                apt-get install -y shim-signed grub-efi-amd64-signed grub-efi-amd64 || true
-                apt-get install -f -y || true
-
-                if ! apt-get install -y grub-efi-amd64; then
-                    echo "WARNING: grub-efi-amd64 installation failed. You may need to install it manually."
-                fi
-            else
-                if ! apt-get install -y grub-pc; then
-                    echo "WARNING: grub-pc installation failed. You may need to install it manually."
-                fi
-            fi
-        else
-            # Broad grub install for other distros using apt
-            apt-get install -y grub2 grub-common grub-pc grub-efi grub2-common || true
-        fi
-
+        apt-get install -y curl rsync squashfs-tools parted dosfstools e2fsprogs || exit 1
     elif command -v dnf >/dev/null 2>&1; then
         echo "Using dnf"
-        dnf install -y curl rsync squashfs-tools grub2 parted dosfstools e2fsprogs || {
-            echo "ERROR: Failed installing dependencies via dnf."
-            exit 1
-        }
-
+        dnf install -y curl rsync squashfs-tools grub2 parted dosfstools e2fsprogs || exit 1
     elif command -v pacman >/dev/null 2>&1; then
         echo "Using pacman"
-        pacman -Sy --noconfirm curl rsync squashfs-tools grub parted dosfstools e2fsprogs || {
-            echo "ERROR: Failed installing dependencies via pacman."
-            exit 1
-        }
-
+        pacman -Sy --noconfirm curl rsync squashfs-tools grub parted dosfstools e2fsprogs || exit 1
     elif command -v xbps-install >/dev/null 2>&1; then
         echo "Using xbps-install"
-        xbps-install -Sy curl rsync squashfs-tools grub parted dosfstools e2fsprogs || {
-            echo "ERROR: Failed installing dependencies via xbps-install."
-            exit 1
-        }
+        xbps-install -Sy curl rsync squashfs-tools grub parted dosfstools e2fsprogs || exit 1
     else
-        echo "ERROR: No supported package manager found to install dependencies."
-        echo "Please install curl, rsync, squashfs-tools, grub, parted, dosfstools, e2fsprogs manually."
+        echo "ERROR: No supported package manager found."
         exit 1
     fi
 }
 
 install_deps
 
-# Verify necessary commands exist
-check_command() {
-    local cmd="$1"
+for cmd in curl rsync unsquashfs grub-install grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "ERROR: Required command '$cmd' not found even after installation."
+        echo "ERROR: Required command '$cmd' not found."
         exit 1
     fi
-}
-
-for cmd in curl rsync unsquashfs grub-install grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
-    check_command "$cmd"
 done
 
 mkdir -p "$DOWNLOAD_DIR"
@@ -146,164 +106,106 @@ declare -A ISO_URLS=(
 )
 
 if [[ -z "${ISO_URLS[$TARGET_DISTRO]:-}" ]]; then
-    echo "ERROR: Unsupported target distro '$TARGET_DISTRO'. Supported: fedora, ubuntu, mint, arch, void."
+    echo "ERROR: Unsupported target distro '$TARGET_DISTRO'."
     exit 1
 fi
 
 ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
 ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
 
-# Download ISO or tarball if missing
-if [[ -f "$ISO_FILE" ]]; then
-    echo "ISO/tarball already exists at $ISO_FILE. Skipping download."
-else
-    echo "Downloading $TARGET_DISTRO ISO/tarball from $ISO_URL ..."
-    if command -v curl >/dev/null 2>&1; then
-        curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || { echo "Failed to download $TARGET_DISTRO rootfs."; exit 1; }
-    else
-        wget -q --show-progress -O "$ISO_FILE" "$ISO_URL" || { echo "Failed to download $TARGET_DISTRO rootfs."; exit 1; }
-    fi
-    echo "Download completed: $ISO_FILE"
+if [[ ! -f "$ISO_FILE" ]]; then
+    echo "Downloading $TARGET_DISTRO ISO/tarball..."
+    curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || exit 1
 fi
 
-# Partitioning and wiping
+# Partitioning
 if [[ "$ERASE_MODE" == "whole" ]]; then
     echo "WARNING: This will ERASE ALL DATA on disk $TARGET_DISK!"
-    read -rp "Type YES to continue partitioning $TARGET_DISK: " confirm
-    if [[ "$confirm" != "YES" ]]; then
-        echo "Aborted by user."
-        exit 1
-    fi
+    read -rp "Type YES to continue: " confirm
+    [[ "$confirm" != "YES" ]] && echo "Aborted." && exit 1
 
-    echo "Creating new partition table on $TARGET_DISK..."
     if [[ "$FIRMWARE" == "uefi" ]]; then
         parted -s "$TARGET_DISK" mklabel gpt
-    else
-        parted -s "$TARGET_DISK" mklabel msdos
-    fi
-
-    if [[ "$FIRMWARE" == "uefi" ]]; then
-        echo "Creating EFI System Partition and Linux root partition on $TARGET_DISK..."
         parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
         parted -s "$TARGET_DISK" set 1 boot on
         parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
         EFI_PARTITION="${TARGET_DISK}p1"
         ROOT_PARTITION="${TARGET_DISK}p2"
     else
-        echo "Creating single Linux root partition on $TARGET_DISK..."
+        parted -s "$TARGET_DISK" mklabel msdos
         parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%
         ROOT_PARTITION="${TARGET_DISK}1"
     fi
-
 elif [[ "$ERASE_MODE" == "partitions" ]]; then
-    echo "WARNING: This will ERASE data on specified partitions: $PARTITIONS_TO_ERASE"
-    read -rp "Type YES to continue wiping these partitions: " confirm
-    if [[ "$confirm" != "YES" ]]; then
-        echo "Aborted by user."
-        exit 1
-    fi
+    echo "WARNING: This will ERASE data on: $PARTITIONS_TO_ERASE"
+    read -rp "Type YES to continue: " confirm
+    [[ "$confirm" != "YES" ]] && echo "Aborted." && exit 1
+
     IFS=',' read -ra PART_ARR <<< "$PARTITIONS_TO_ERASE"
     for p in "${PART_ARR[@]}"; do
-        echo "Wiping partition $p..."
         dd if=/dev/zero of="$p" bs=1M count=10 status=progress || true
     done
-    # User must ensure root partition is specified explicitly here (or script enhanced to handle)
-    echo "Please set ROOT_PARTITION environment variable or modify script to specify root partition."
-    echo "Exiting."
-    exit 1
+
+    if [[ -z "$ROOT_PARTITION" ]]; then
+        echo "ERROR: --root-partition is required with --erase partitions"
+        exit 1
+    fi
+    if [[ "$FIRMWARE" == "uefi" && -z "$EFI_PARTITION" ]]; then
+        echo "ERROR: --efi-partition is required in UEFI mode"
+        exit 1
+    fi
 else
-    echo "ERROR: Unknown erase mode '$ERASE_MODE'. Supported: whole, partitions."
+    echo "ERROR: Invalid --erase mode"
     exit 1
 fi
 
 # Format partitions
 echo "Formatting partitions..."
-if [[ "$FIRMWARE" == "uefi" ]]; then
-    mkfs.vfat -F32 -n EFI "$EFI_PARTITION"
-fi
+[[ "$FIRMWARE" == "uefi" ]] && mkfs.vfat -F32 -n EFI "$EFI_PARTITION"
 mkfs.ext4 -F -L ROOT "$ROOT_PARTITION"
 
-# Mount target root
-echo "Mounting target root partition..."
+# Mount
+echo "Mounting partitions..."
 mkdir -p /mnt/target
 mount "$ROOT_PARTITION" /mnt/target
-
-if [[ "$FIRMWARE" == "uefi" ]]; then
-    mkdir -p /mnt/target/boot/efi
-    mount "$EFI_PARTITION" /mnt/target/boot/efi
-fi
+[[ "$FIRMWARE" == "uefi" ]] && mkdir -p /mnt/target/boot/efi && mount "$EFI_PARTITION" /mnt/target/boot/efi
 
 # Extract filesystem
-echo "Extracting filesystem for $TARGET_DISTRO..."
-
+echo "Extracting filesystem..."
+ISO_MOUNT="/mnt/iso_mount"
+mkdir -p "$ISO_MOUNT"
 case "$TARGET_DISTRO" in
     fedora)
-        # Fedora uses squashfs.img in LiveOS
-        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
-        # Mount ISO and extract squashfs
-        ISO_MOUNT="/mnt/iso_mount"
-        mkdir -p "$ISO_MOUNT"
         mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        if [[ ! -f "$SQUASH" ]]; then
-            echo "ERROR: Fedora squashfs image not found at $SQUASH"
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$SQUASH"
-        umount "$ISO_MOUNT"
-        rmdir "$ISO_MOUNT"
+        unsquashfs -f -d /mnt/target "$ISO_MOUNT/LiveOS/squashfs.img"
         ;;
     ubuntu|mint)
-        # Ubuntu and Mint use casper filesystem.squashfs
-        ISO_MOUNT="/mnt/iso_mount"
-        mkdir -p "$ISO_MOUNT"
         mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
-        if [[ ! -f "$SQUASH" ]]; then
-            echo "ERROR: $TARGET_DISTRO squashfs image not found at $SQUASH"
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$SQUASH"
-        umount "$ISO_MOUNT"
-        rmdir "$ISO_MOUNT"
+        unsquashfs -f -d /mnt/target "$ISO_MOUNT/casper/filesystem.squashfs"
         ;;
     arch)
-        # Extract Arch bootstrap tarball directly
-        echo "Extracting Arch bootstrap tarball..."
         tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
         ;;
     void)
-        # Void uses squashfs.img under LiveOS
-        ISO_MOUNT="/mnt/iso_mount"
-        mkdir -p "$ISO_MOUNT"
         mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
-        if [[ ! -f "$SQUASH" ]]; then
-            echo "ERROR: Void squashfs image not found at $SQUASH"
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$SQUASH"
-        umount "$ISO_MOUNT"
-        rmdir "$ISO_MOUNT"
+        unsquashfs -f -d /mnt/target "$ISO_MOUNT/LiveOS/squashfs.img"
         ;;
     *)
-        echo "ERROR: Unsupported distro extraction logic."
+        echo "ERROR: Unsupported distro."
         exit 1
         ;;
 esac
+umount "$ISO_MOUNT"
+rmdir "$ISO_MOUNT"
 
-echo "Filesystem extracted."
-
-# Setup mounts for chroot
+# Prep for chroot
 for fs in proc sys dev run; do
-    mount --bind "/$fs" "/mnt/target/$fs"
+    mount --bind /$fs /mnt/target/$fs
 done
-
-# Copy resolv.conf for network in chroot
 cp /etc/resolv.conf /mnt/target/etc/resolv.conf
 
-# Install grub inside chroot
-echo "Installing GRUB bootloader inside chroot..."
-
+# Install GRUB in chroot
+echo "Installing GRUB..."
 chroot /mnt/target /bin/bash -c "
 set -e
 if command -v apt-get >/dev/null 2>&1; then
@@ -318,31 +220,20 @@ elif command -v xbps-install >/dev/null 2>&1; then
 fi
 
 if [[ \"$FIRMWARE\" == \"uefi\" ]]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || {
-        echo 'WARNING: grub-install failed inside chroot for EFI.'
-    }
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
 else
-    grub-install --boot-directory=/boot \"$TARGET_DISK\" || {
-        echo 'WARNING: grub-install failed inside chroot for BIOS.'
-    }
+    grub-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
 fi
 
-grub-mkconfig -o /boot/grub/grub.cfg || {
-    echo 'WARNING: grub-mkconfig failed inside chroot.'
-}
+grub-mkconfig -o /boot/grub/grub.cfg || echo 'WARNING: grub-mkconfig failed.'
 "
 
-# Cleanup mounts
-echo "Cleaning up mounts..."
+# Cleanup
 for fs in run dev sys proc; do
     umount /mnt/target/$fs || true
 done
-
-if [[ "$FIRMWARE" == "uefi" ]]; then
-    umount /mnt/target/boot/efi || true
-fi
+[[ "$FIRMWARE" == "uefi" ]] && umount /mnt/target/boot/efi || true
 umount /mnt/target || true
 
-echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
-
+echo "Migration complete! Reboot into $TARGET_DISTRO."
 exit 0

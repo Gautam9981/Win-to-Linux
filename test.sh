@@ -193,8 +193,8 @@ if [[ "$FIRMWARE" == "uefi" ]]; then
     parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
     parted -s "$TARGET_DISK" set 1 boot on
     parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
-    EFI_PARTITION="${TARGET_DISK}1"
-    ROOT_PARTITION="${TARGET_DISK}2"
+    EFI_PARTITION="${TARGET_DISK}p1"
+    ROOT_PARTITION="${TARGET_DISK}p2"
 else
     echo "Creating single Linux root partition on $TARGET_DISK..."
     parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%

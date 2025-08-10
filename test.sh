@@ -4,7 +4,7 @@ set -euo pipefail
 ##############################
 # Migration Script Usage:
 #
-# Run as root (sudo ./migrate.sh --to <distro> --partition <partition> [--download-dir <dir>])
+# Run as root (sudo ./migrate.sh --to <distro> --disk <disk> [--download-dir <dir>])
 # Supported distros: fedora, ubuntu, mint, arch, void
 ##############################
 
@@ -16,20 +16,25 @@ fi
 
 # Parse CLI args early for TARGET_DISTRO, needed in install_deps
 TARGET_DISTRO=""
-TARGET_PARTITION=""
+TARGET_DISK=""
 DOWNLOAD_DIR="/root/Downloads"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --to) TARGET_DISTRO="${2,,}"; shift 2 ;;
-        --disk) TARGET_PARTITION="$2"; shift 2 ;;
+        --disk) TARGET_DISK="$2"; shift 2 ;;
         --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac
 done
 
-if [[ -z "$TARGET_DISTRO" || -z "$TARGET_PARTITION" ]]; then
-    echo "ERROR: --to and --partition parameters are required."
+if [[ -z "$TARGET_DISTRO" || -z "$TARGET_DISK" ]]; then
+    echo "ERROR: --to and --disk parameters are required."
+    exit 1
+fi
+
+if [[ ! -b "$TARGET_DISK" ]]; then
+    echo "ERROR: Specified disk '$TARGET_DISK' is not a block device."
     exit 1
 fi
 
@@ -42,6 +47,7 @@ detect_firmware() {
     fi
 }
 FIRMWARE=$(detect_firmware)
+echo "Detected firmware: $FIRMWARE"
 
 # Install dependencies based on available package manager and detected firmware
 install_deps() {
@@ -57,9 +63,18 @@ install_deps() {
             exit 1
         }
 
-        # Install grub package based on distro and firmware
+        # Special handling for grub on Ubuntu/Mint due to grub-efi-amd64 issues
         if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
+            echo "Installing grub EFI/BIOS packages for $TARGET_DISTRO"
+
             if [[ "$FIRMWARE" == "uefi" ]]; then
+                # Install necessary EFI packages
+                apt-get install -y shim-signed grub-efi-amd64-signed grub-efi-amd64 || true
+
+                # Try fixing broken dependencies
+                apt-get install -f -y || true
+
+                # Retry grub packages install to fix potential dependency issues
                 if ! apt-get install -y grub-efi-amd64; then
                     echo "WARNING: grub-efi-amd64 installation failed. You may need to install it manually."
                 fi
@@ -69,10 +84,8 @@ install_deps() {
                 fi
             fi
         else
-            # For other distros, install a broad grub package list
-            if ! apt-get install -y grub2 grub-common grub-pc grub-efi grub2-common; then
-                echo "WARNING: grub package installation failed. You may need to install it manually."
-            fi
+            # For other distros, install a broad grub package list if apt-get available
+            apt-get install -y grub2 grub-common grub-pc grub-efi grub2-common || true
         fi
 
     elif command -v dnf >/dev/null 2>&1; then
@@ -161,57 +174,33 @@ echo "ISO mounted."
 
 # Partitioning
 
-echo "Preparing target partition $TARGET_PARTITION..."
-
-if mountpoint -q "$TARGET_PARTITION"; then
-    echo "Unmounting $TARGET_PARTITION..."
-    umount "$TARGET_PARTITION"
-fi
-
-DISK=$(lsblk -no pkname "$TARGET_PARTITION")
-if [[ -z "$DISK" ]]; then
-    echo "ERROR: Cannot determine disk for partition $TARGET_PARTITION"
-    exit 1
-fi
-DISK="/dev/$DISK"
-
-# Wipe partition table on disk - BE CAREFUL, WARNING TO USER
-echo "WARNING: This will erase all data on $DISK!"
-read -rp "Type YES to continue partitioning $DISK: " confirm
+echo "WARNING: This will ERASE ALL DATA on disk $TARGET_DISK!"
+read -rp "Type YES to continue partitioning $TARGET_DISK: " confirm
 if [[ "$confirm" != "YES" ]]; then
     echo "Aborted by user."
     exit 1
 fi
 
-# Create GPT or MBR based on firmware
-echo "Creating new partition table on $DISK..."
+echo "Creating new partition table on $TARGET_DISK..."
 if [[ "$FIRMWARE" == "uefi" ]]; then
-    parted -s "$DISK" mklabel gpt
+    parted -s "$TARGET_DISK" mklabel gpt
 else
-    parted -s "$DISK" mklabel msdos
+    parted -s "$TARGET_DISK" mklabel msdos
 fi
 
-# Partition layout:
-# For UEFI:
-#   1) EFI System Partition (512M, FAT32)
-#   2) Linux root partition (rest)
-# For BIOS:
-#   1) Linux root partition (whole disk)
-
 if [[ "$FIRMWARE" == "uefi" ]]; then
-    echo "Creating EFI System Partition and Linux root partition..."
-    parted -s "$DISK" mkpart ESP fat32 1MiB 513MiB
-    parted -s "$DISK" set 1 boot on
-    parted -s "$DISK" mkpart primary ext4 513MiB 100%
-    EFI_PARTITION="${DISK}1"
-    ROOT_PARTITION="${DISK}2"
+    echo "Creating EFI System Partition and Linux root partition on $TARGET_DISK..."
+    parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
+    parted -s "$TARGET_DISK" set 1 boot on
+    parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
+    EFI_PARTITION="${TARGET_DISK}1"
+    ROOT_PARTITION="${TARGET_DISK}2"
 else
-    echo "Creating single Linux root partition..."
-    parted -s "$DISK" mkpart primary ext4 1MiB 100%
-    ROOT_PARTITION="${DISK}1"
+    echo "Creating single Linux root partition on $TARGET_DISK..."
+    parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%
+    ROOT_PARTITION="${TARGET_DISK}1"
 fi
 
-# Format partitions
 echo "Formatting partitions..."
 if [[ "$FIRMWARE" == "uefi" ]]; then
     mkfs.vfat -F32 -n EFI "$EFI_PARTITION"
@@ -289,7 +278,7 @@ if [[ "$FIRMWARE" == "uefi" ]]; then
     done
 else
     echo "Installing GRUB BIOS..."
-    if ! grub-install --boot-directory=/mnt/target/boot "$DISK"; then
+    if ! grub-install --boot-directory=/mnt/target/boot "$TARGET_DISK"; then
         echo "WARNING: grub-install failed. You may need to fix the BIOS bootloader manually."
     fi
 

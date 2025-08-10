@@ -1,20 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-##############################
-# Migration Script Usage:
-#
-# Run as root (sudo ./migrate.sh)
-# Supports fedora, ubuntu, mint, arch, void
-##############################
-
-# Check for root
+# Check root
 if [[ "$EUID" -ne 0 ]]; then
-    echo "ERROR: This script must be run as root (sudo)."
+    echo "ERROR: Run as root (sudo)."
     exit 1
 fi
 
-# Check commands
+# Check commands function
 check_command() {
     local cmd="$1"
     local pkg="$2"
@@ -25,37 +18,26 @@ check_command() {
     fi
 }
 
-if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
-    echo "ERROR: Neither curl nor wget found. Please install one of them."
-    exit 1
-fi
+for cmd in curl rsync unsquashfs grub-install grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4; do
+    check_command "$cmd" ""
+done
 
-check_command rsync "rsync"
-check_command unsquashfs "squashfs-tools"
-check_command grub-install "grub2"
-check_command grub-mkconfig "grub2"
-check_command mount "mount"
-check_command umount "umount"
-
-# Defaults
-DOWNLOAD_DIR="/root/Downloads"
-
-# Parse CLI args
+# Parse args
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --from) SOURCE_DISTRO="${2,,}"; shift 2 ;;
         --to) TARGET_DISTRO="${2,,}"; shift 2 ;;
-        --partition) TARGET_PARTITION="$2"; shift 2 ;;
+        --disk) TARGET_DISK="$2"; shift 2 ;;   # Use disk, not partition, for partitioning
         --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
-        *) echo "Unknown parameter: $1"; exit 1 ;;
+        *) echo "Unknown param $1"; exit 1 ;;
     esac
 done
 
-if [[ -z "${TARGET_DISTRO:-}" || -z "${TARGET_PARTITION:-}" ]]; then
-    echo "ERROR: --to and --partition parameters are required."
+if [[ -z "${TARGET_DISTRO:-}" || -z "${TARGET_DISK:-}" ]]; then
+    echo "ERROR: --to and --disk parameters are required."
     exit 1
 fi
 
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-/root/Downloads}"
 mkdir -p "$DOWNLOAD_DIR"
 
 declare -A ISO_URLS=(
@@ -67,133 +49,133 @@ declare -A ISO_URLS=(
 )
 
 if [[ -z "${ISO_URLS[$TARGET_DISTRO]:-}" ]]; then
-    echo "ERROR: Unsupported target distro '$TARGET_DISTRO'. Supported: fedora, ubuntu, mint, arch, void."
+    echo "ERROR: Unsupported distro $TARGET_DISTRO."
     exit 1
 fi
 
 ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
 ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
 
-# Download ISO if missing
-if [[ -f "$ISO_FILE" ]]; then
-    echo "ISO already exists at $ISO_FILE. Skipping download."
-else
-    echo "Downloading $TARGET_DISTRO ISO from $ISO_URL ..."
+# Download ISO if needed
+if [[ ! -f "$ISO_FILE" ]]; then
+    echo "Downloading $TARGET_DISTRO ISO..."
     if command -v curl >/dev/null 2>&1; then
-        curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+        curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL"
     else
-        wget -q --show-progress -O "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+        wget -q --show-progress -O "$ISO_FILE" "$ISO_URL"
     fi
-    echo "Download completed: $ISO_FILE"
+fi
+
+# Detect firmware mode
+if [[ -d /sys/firmware/efi ]]; then
+    firmware="uefi"
+else
+    firmware="bios"
+fi
+echo "Firmware detected: $firmware"
+
+# Partitioning target disk
+echo "Partitioning $TARGET_DISK for $firmware boot..."
+
+# Unmount all partitions on the disk
+for part in $(lsblk -ln -o NAME "$TARGET_DISK" | tail -n +2); do
+    umount "/dev/$part" 2>/dev/null || true
+done
+
+if [[ "$firmware" == "uefi" ]]; then
+    parted "$TARGET_DISK" --script mklabel gpt
+    parted "$TARGET_DISK" --script mkpart ESP fat32 1MiB 513MiB
+    parted "$TARGET_DISK" --script set 1 boot on
+    parted "$TARGET_DISK" --script set 1 esp on
+    parted "$TARGET_DISK" --script mkpart primary ext4 513MiB 100%
+else
+    parted "$TARGET_DISK" --script mklabel msdos
+    parted "$TARGET_DISK" --script mkpart primary ext4 1MiB 100%
+    parted "$TARGET_DISK" --script set 1 boot on
+fi
+
+sleep 2  # wait for kernel to refresh partition table
+
+if [[ "$firmware" == "uefi" ]]; then
+    ESP_PART="${TARGET_DISK}1"
+    ROOT_PART="${TARGET_DISK}2"
+else
+    ROOT_PART="${TARGET_DISK}1"
+fi
+
+# Format partitions
+if [[ "$firmware" == "uefi" ]]; then
+    mkfs.vfat -F32 "$ESP_PART"
+fi
+mkfs.ext4 -F "$ROOT_PART"
+
+# Mount partitions
+mountpoint -q /mnt/target && umount /mnt/target
+mkdir -p /mnt/target
+mount "$ROOT_PART" /mnt/target
+
+if [[ "$firmware" == "uefi" ]]; then
+    mkdir -p /mnt/target/boot/efi
+    mount "$ESP_PART" /mnt/target/boot/efi
 fi
 
 # Mount ISO
 ISO_MOUNT="/mnt/iso_mount"
-if mountpoint -q "$ISO_MOUNT"; then
-    echo "Unmounting previous ISO mount at $ISO_MOUNT..."
-    umount "$ISO_MOUNT"
-fi
+mountpoint -q "$ISO_MOUNT" && umount "$ISO_MOUNT"
 mkdir -p "$ISO_MOUNT"
-echo "Mounting ISO to $ISO_MOUNT..."
 mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-echo "ISO mounted."
 
-# Prepare target partition
-echo "Unmounting $TARGET_PARTITION if mounted..."
-umount "$TARGET_PARTITION" 2>/dev/null || true
+# Extract squashfs per distro (reuse your logic here)
+case "$TARGET_DISTRO" in
+    fedora)
+        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
+        ;;
+    ubuntu|mint)
+        SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
+        ;;
+    arch)
+        rsync -aHAX --exclude=/arch/boot/x86_64/airootfs.sfs "$ISO_MOUNT/" /mnt/target/
+        SQUASH="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
+        ;;
+    void)
+        SQUASH="$ISO_MOUNT/livefs.squashfs"
+        ;;
+    *)
+        echo "Unsupported distro."
+        exit 1
+        ;;
+esac
 
-echo "Formatting $TARGET_PARTITION as ext4..."
-mkfs.ext4 -F "$TARGET_PARTITION"
-
-echo "Mounting $TARGET_PARTITION to /mnt/target..."
-mkdir -p /mnt/target
-mount "$TARGET_PARTITION" /mnt/target
-echo "Partition mounted."
-
-# Function to detect squashfs image path based on distro
-detect_squashfs() {
-    local base="$1"
-    declare -a candidates=()
-    case "$TARGET_DISTRO" in
-        fedora)
-            candidates=("$base/LiveOS/squashfs.img" "$base/LiveOS/rootfs.img")
-            ;;
-        ubuntu|mint)
-            candidates=("$base/casper/filesystem.squashfs" "$base/casper/filesystem.img")
-            ;;
-        arch)
-            candidates=("$base/arch/boot/x86_64/airootfs.sfs")
-            ;;
-        void)
-            candidates=("$base/LiveOS/squashfs.img" "$base/livefs.squashfs" "$base/squashfs.img")
-            ;;
-        *)
-            echo "ERROR: Unsupported distro for squashfs detection."
-            exit 1
-            ;;
-    esac
-
-    for candidate in "${candidates[@]}"; do
-        if [[ -f "$candidate" ]]; then
-            echo "$candidate"
-            return 0
-        fi
-    done
-    return 1
-}
-
-# Extract filesystem
-echo "Extracting live filesystem for $TARGET_DISTRO..."
-
-SQUASH=$(detect_squashfs "$ISO_MOUNT")
-if [[ -z "$SQUASH" ]]; then
-    echo "ERROR: Could not find squashfs image for $TARGET_DISTRO in $ISO_MOUNT."
+if [[ -f "$SQUASH" ]]; then
+    echo "Extracting squashfs..."
+    unsquashfs -f -d /mnt/target "$SQUASH"
+else
+    echo "ERROR: Squashfs not found at $SQUASH"
     exit 1
 fi
 
-echo "Using squashfs image at: $SQUASH"
-echo "Extracting $SQUASH..."
-unsquashfs -f -d /mnt/target "$SQUASH"
-
-DISK=$(lsblk -no pkname "$TARGET_PARTITION")
-if [[ -z "$DISK" ]]; then
-    echo "ERROR: Cannot determine disk for partition $TARGET_PARTITION"
-    exit 1
-fi
-DISK="/dev/$DISK"
-
-# Decide if we chroot or not
-if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" || "$TARGET_DISTRO" == "fedora" ]]; then
-    echo "Mounting pseudo filesystems for chroot..."
+# Mount pseudo filesystems for chroot if supported
+if [[ "$TARGET_DISTRO" == "fedora" || "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
     for fs in proc sys dev; do
         mount --bind /$fs /mnt/target/$fs
     done
-
-    echo "Installing GRUB inside chroot on $DISK..."
-    chroot /mnt/target grub-install "$DISK"
-
-    echo "Generating GRUB config inside chroot..."
+    chroot /mnt/target grub-install
     chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
-
-    echo "Cleaning up mounts..."
     for fs in proc sys dev; do
         umount /mnt/target/$fs
     done
-
 else
-    # For arch and void, install grub from host environment and skip chroot
-    echo "Installing GRUB from host environment onto $DISK..."
-    grub-install --boot-directory=/mnt/target/boot "$DISK"
-
-    echo ""
-    echo "IMPORTANT:"
-    echo "For $TARGET_DISTRO, you should boot into your new system after reboot"
-    echo "and run the following command to generate the GRUB configuration:"
-    echo "    sudo grub-mkconfig -o /boot/grub/grub.cfg"
-    echo ""
+    # Non-chroot grub install
+    if [[ "$firmware" == "uefi" ]]; then
+        grub-install --target=x86_64-efi --efi-directory=/mnt/target/boot/efi --bootloader-id=GRUB --removable --boot-directory=/mnt/target/boot
+    else
+        grub-install --target=i386-pc --boot-directory=/mnt/target/boot "$TARGET_DISK"
+    fi
+    echo "IMPORTANT: After boot, run grub-mkconfig in new system."
 fi
 
 # Cleanup
+umount /mnt/target/boot/efi 2>/dev/null || true
 umount /mnt/target
 umount "$ISO_MOUNT"
 rmdir "$ISO_MOUNT"

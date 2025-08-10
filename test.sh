@@ -22,7 +22,7 @@ DOWNLOAD_DIR="/root/Downloads"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --to) TARGET_DISTRO="${2,,}"; shift 2 ;;
-        --partition) TARGET_PARTITION="$2"; shift 2 ;;
+        --disk) TARGET_PARTITION="$2"; shift 2 ;;
         --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
         *) echo "Unknown parameter: $1"; exit 1 ;;
     esac

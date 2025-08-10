@@ -236,7 +236,7 @@ case "$TARGET_DISTRO" in
         SQUASH="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
         ;;
     void)
-        SQUASH="$ISO_MOUNT/livefs.squashfs"
+        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
         ;;
     *)
         echo "ERROR: Unsupported distro extraction logic."

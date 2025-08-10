@@ -64,6 +64,7 @@ detect_firmware() {
 FIRMWARE=$(detect_firmware)
 echo "Detected firmware: $FIRMWARE"
 
+# Function to install dependencies based on the distro
 install_deps() {
     echo "Detecting package manager and installing dependencies..."
 
@@ -88,7 +89,7 @@ install_deps() {
         echo "Using dnf (Fedora)"
         BASE_PKGS=(
             curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-            grub2 grub2-tools efibootmgr shim
+            grub2 efibootmgr shim
         )
         dnf install -y "${BASE_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with dnf"
@@ -146,6 +147,7 @@ else
     exit 1
 fi
 
+# Validate necessary tools
 for cmd in curl rsync unsquashfs grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: Required command '$cmd' not found."
@@ -205,60 +207,115 @@ elif [[ "$ERASE_MODE" == "partitions" ]]; then
     done
 
     if [[ -z "$ROOT_PARTITION" ]]; then
-        echo "ERROR: Root partition must be specified with --root-partition in erase mode."
+        echo "ERROR: --root-partition is required with --erase partitions"
         exit 1
     fi
+
+    if [[ "$FIRMWARE" == "uefi" && -z "$EFI_PARTITION" ]]; then
+        echo "ERROR: --efi-partition is required in UEFI mode"
+        exit 1
+    fi
+else
+    echo "ERROR: Invalid --erase mode"
+    exit 1
 fi
 
-# Mount root partition
-mkfs.ext4 "$ROOT_PARTITION"
+# Format partitions
+echo "Formatting partitions..."
+[[ "$FIRMWARE" == "uefi" ]] && mkfs.vfat -F32 -n EFI "$EFI_PARTITION"
+mkfs.ext4 -F -L ROOT "$ROOT_PARTITION"
+
+# Mount
+echo "Mounting partitions..."
+mkdir -p /mnt/target
 mount "$ROOT_PARTITION" /mnt/target
+[[ "$FIRMWARE" == "uefi" ]] && mkdir -p /mnt/target/boot/efi && mount "$EFI_PARTITION" /mnt/target/boot/efi
 
-# Mount EFI partition (if UEFI)
-if [[ "$FIRMWARE" == "uefi" && -n "$EFI_PARTITION" ]]; then
-    mkfs.fat -F32 "$EFI_PARTITION"
-    mkdir -p /mnt/target/boot/efi
-    mount "$EFI_PARTITION" /mnt/target/boot/efi
-fi
+# Extract filesystem
+echo "Extracting filesystem..."
+ISO_MOUNT="/mnt/iso_mount"
+mkdir -p "$ISO_MOUNT"
+case "$TARGET_DISTRO" in
+    fedora)
+        mount -o loop "$ISO_FILE" "$ISO_MOUNT"
+        unsquashfs -f -d /mnt/target "$ISO_MOUNT/LiveOS/squashfs.img"
+        ;;
+    ubuntu|mint)
+        mount -o loop "$ISO_FILE" "$ISO_MOUNT"
+        unsquashfs -f -d /mnt/target "$ISO_MOUNT/casper/filesystem.squashfs"
+        ;;
+    arch)
+        tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
+        ;;
+    void)
+        tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
+        ;;
+    *)
+        echo "ERROR: Unsupported distro."
+        exit 1
+        ;;
+esac
+umount "$ISO_MOUNT"
+rmdir "$ISO_MOUNT"
 
-# Extract the OS
-if [[ "$TARGET_DISTRO" == "arch" || "$TARGET_DISTRO" == "void" ]]; then
-    echo "Extracting tarball for $TARGET_DISTRO..."
-    tar -xpf "$ISO_FILE" -C /mnt/target
-elif [[ "$TARGET_DISTRO" == "fedora" || "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
-    echo "Mounting and extracting ISO for $TARGET_DISTRO..."
-    mkdir -p /mnt/iso
-    mount -o loop "$ISO_FILE" /mnt/iso
-    rsync -a /mnt/iso/ /mnt/target/
-fi
+# Prep for chroot
+for fs in proc sys dev run; do
+    mount --bind /$fs /mnt/target/$fs
+done
+cp /etc/resolv.conf /mnt/target/etc/resolv.conf
 
-# Prepare the chroot
-mount --bind /dev /mnt/target/dev
-mount --bind /proc /mnt/target/proc
-mount --bind /sys /mnt/target/sys
-mount --bind /run /mnt/target/run
-
+# Install GRUB in chroot
+echo "Installing GRUB..."
 chroot /mnt/target /bin/bash -c "
-    set -e
+set -e
 
-    echo 'Installing required GRUB and bootloader...'
+# Detect GRUB commands
+if command -v grub-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD=grub-install
+elif command -v grub2-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD=grub2-install
+else
+    echo 'ERROR: grub-install or grub2-install not found.'
+    exit 1
+fi
 
-    # Install GRUB bootloader (BIOS/UEFI)
-    if [ -d /sys/firmware/efi ]; then
-        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy
-    else
-        grub-install --boot-directory=/boot $TARGET_DISK --recheck --no-floppy
-    fi
+if command -v grub-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD=grub-mkconfig
+elif command -v grub2-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD=grub2-mkconfig
+else
+    echo 'ERROR: grub-mkconfig or grub2-mkconfig not found.'
+    exit 1
+fi
 
-    # Generate grub configuration
-    if command -v grub-mkconfig >/dev/null 2>&1; then
-        grub-mkconfig -o /boot/grub/grub.cfg
-    elif command -v grub2-mkconfig >/dev/null 2>&1; then
-        grub2-mkconfig -o /boot/grub/grub.cfg
-    fi
+# Install required packages
+if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y grub-common grub-pc grub-efi-amd64 shim-signed || true
+elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y grub2 shim efibootmgr || true
+elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm grub efibootmgr || true
+elif command -v xbps-install >/dev/null 2>&1; then
+    xbps-install -Sy grub efibootmgr || true
+fi
+
+# Install GRUB
+if [ -d /sys/firmware/efi ]; then
+    \$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
+else
+    \$GRUB_INSTALL_CMD --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
+fi
+
+\$GRUB_MKCONFIG_CMD -o /boot/grub/grub.cfg || echo 'WARNING: grub config generation failed.'
 "
 
-# Unmount and clean up
-umount -R /mnt/target
+# Cleanup
+for fs in run dev sys proc; do
+    umount /mnt/target/$fs || true
+done
+[[ "$FIRMWARE" == "uefi" ]] && umount /mnt/target/boot/efi || true
+umount /mnt/target || true
 
-echo "Migration and GRUB installation completed successfully."
+echo "Migration complete! Reboot into $TARGET_DISTRO."
+exit 0

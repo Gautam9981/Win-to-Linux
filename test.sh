@@ -15,11 +15,10 @@ set -euo pipefail
 #   sudo ./migrate.sh --from fedora --to arch --partition /dev/sda3
 #
 # Parameters:
-#   --from       Source distro (for info only, script always installs target)
-#   --to         Target distro (fedora, ubuntu, mint, arch, void)
-#   --partition  Target partition device (e.g. /dev/sda3)
+#   --from         Source distro (for info only)
+#   --to           Target distro (fedora, ubuntu, mint, arch, void)
+#   --partition    Target partition device (e.g. /dev/sda3)
 #   --download-dir Directory to store downloaded ISOs (default: /root/Downloads)
-#
 ##############################
 
 # Check for root
@@ -47,7 +46,7 @@ if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
 fi
 check_command rsync "rsync"
 check_command unsquashfs "squashfs-tools"
-check_command grub-install "grub2"    # package names may vary
+check_command grub-install "grub2"
 check_command grub-mkconfig "grub2"
 check_command mount "mount"
 check_command umount "umount"
@@ -90,13 +89,18 @@ fi
 ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
 ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
 
-echo "Downloading $TARGET_DISTRO ISO from $ISO_URL ..."
-if command -v curl >/dev/null 2>&1; then
-    curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+# Skip download if ISO already exists
+if [[ -f "$ISO_FILE" ]]; then
+    echo "ISO already exists at $ISO_FILE. Skipping download."
 else
-    wget -q --show-progress -O "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+    echo "Downloading $TARGET_DISTRO ISO from $ISO_URL ..."
+    if command -v curl >/dev/null 2>&1; then
+        curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+    else
+        wget -q --show-progress -O "$ISO_FILE" "$ISO_URL" || { echo "Failed to download ISO."; exit 1; }
+    fi
+    echo "Download completed: $ISO_FILE"
 fi
-echo "Download completed: $ISO_FILE"
 
 # Mount ISO to a temporary mount point
 ISO_MOUNT="/mnt/iso_mount"
@@ -110,7 +114,9 @@ umount "$TARGET_PARTITION" 2>/dev/null || true
 echo "Formatting $TARGET_PARTITION as ext4..."
 mkfs.ext4 -F "$TARGET_PARTITION"
 
+# Ensure mount point exists
 mkdir -p /mnt/target
+
 echo "Mounting $TARGET_PARTITION to /mnt/target..."
 mount "$TARGET_PARTITION" /mnt/target
 
@@ -119,7 +125,6 @@ echo "Extracting live filesystem for $TARGET_DISTRO..."
 
 case "$TARGET_DISTRO" in
     fedora)
-        # Fedora livesystem squashfs usually in LiveOS/squashfs.img
         FEDORA_SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
         if [[ ! -f "$FEDORA_SQUASH" ]]; then
             echo "Fedora squashfs not found at expected location."
@@ -128,7 +133,6 @@ case "$TARGET_DISTRO" in
         unsquashfs -f -d /mnt/target "$FEDORA_SQUASH"
         ;;
     ubuntu|mint)
-        # Ubuntu & Mint use casper/filesystem.squashfs
         UBUNTU_SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
         if [[ ! -f "$UBUNTU_SQUASH" ]]; then
             echo "Ubuntu/Mint squashfs not found at expected location."
@@ -137,9 +141,7 @@ case "$TARGET_DISTRO" in
         unsquashfs -f -d /mnt/target "$UBUNTU_SQUASH"
         ;;
     arch)
-        # Arch ISO is a live system, just copy contents
         rsync -aHAX --exclude=/arch/boot/x86_64/airootfs.sfs "$ISO_MOUNT/" /mnt/target/
-        # Extract arch root filesystem
         AROOTFS="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
         if [[ -f "$AROOTFS" ]]; then
             unsquashfs -f -d /mnt/target "$AROOTFS"
@@ -148,7 +150,6 @@ case "$TARGET_DISTRO" in
         fi
         ;;
     void)
-        # Void Linux ISO is usually a live rootfs squashfs at root/livefs.squashfs or root/livefs.squashfs
         VOID_SQUASH="$ISO_MOUNT/livefs.squashfs"
         if [[ ! -f "$VOID_SQUASH" ]]; then
             echo "Void Linux squashfs not found at expected location."
@@ -164,12 +165,12 @@ esac
 
 echo "Filesystem extracted."
 
-# Mount necessary pseudo filesystems for chroot
+# Mount pseudo filesystems for chroot
 for fs in proc sys dev; do
     mount --bind /$fs /mnt/target/$fs
 done
 
-# Install GRUB bootloader on the disk containing the target partition
+# Install GRUB bootloader
 DISK=$(lsblk -no pkname "$TARGET_PARTITION")
 if [[ -z "$DISK" ]]; then
     echo "Cannot determine disk for partition $TARGET_PARTITION"
@@ -183,7 +184,7 @@ chroot /mnt/target grub-install "$DISK"
 echo "Generating GRUB config..."
 chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
 
-# Cleanup mounts
+# Cleanup
 for fs in proc sys dev; do
     umount /mnt/target/$fs
 done
@@ -194,3 +195,4 @@ rmdir "$ISO_MOUNT"
 echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
 
 exit 0
+

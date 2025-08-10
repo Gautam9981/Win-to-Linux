@@ -136,6 +136,16 @@ else
     exit 1
 fi
 
+# Check for grub-mkconfig or grub2-mkconfig command
+if command -v grub-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD="grub-mkconfig"
+elif command -v grub2-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD="grub2-mkconfig"
+else
+    echo "ERROR: Required command 'grub-mkconfig' or 'grub2-mkconfig' not found."
+    exit 1
+fi
+
 for cmd in curl rsync unsquashfs grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: Required command '$cmd' not found."
@@ -150,7 +160,7 @@ declare -A ISO_URLS=(
     [ubuntu]="https://mirror.math.princeton.edu/pub/ubuntu-iso/releases/24.04.3/release/ubuntu-24.04.3-desktop-amd64.iso"
     [mint]="https://mirror.math.princeton.edu/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso"
     [arch]="https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.gz"
-    [void]="https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.iso"
+    [void]="https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.tar.xz"
 )
 
 if [[ -z "${ISO_URLS[$TARGET_DISTRO]:-}" ]]; then
@@ -198,6 +208,7 @@ elif [[ "$ERASE_MODE" == "partitions" ]]; then
         echo "ERROR: --root-partition is required with --erase partitions"
         exit 1
     fi
+
     if [[ "$FIRMWARE" == "uefi" && -z "$EFI_PARTITION" ]]; then
         echo "ERROR: --efi-partition is required in UEFI mode"
         exit 1
@@ -235,8 +246,7 @@ case "$TARGET_DISTRO" in
         tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
         ;;
     void)
-        mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        unsquashfs -f -d /mnt/target "$ISO_MOUNT/LiveOS/squashfs.img"
+        tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
         ;;
     *)
         echo "ERROR: Unsupported distro."
@@ -256,6 +266,27 @@ cp /etc/resolv.conf /mnt/target/etc/resolv.conf
 echo "Installing GRUB..."
 chroot /mnt/target /bin/bash -c "
 set -e
+
+# Detect GRUB commands
+if command -v grub-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD=grub-install
+elif command -v grub2-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD=grub2-install
+else
+    echo 'ERROR: grub-install or grub2-install not found.'
+    exit 1
+fi
+
+if command -v grub-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD=grub-mkconfig
+elif command -v grub2-mkconfig >/dev/null 2>&1; then
+    GRUB_MKCONFIG_CMD=grub2-mkconfig
+else
+    echo 'ERROR: grub-mkconfig or grub2-mkconfig not found.'
+    exit 1
+fi
+
+# Install required packages
 if command -v apt-get >/dev/null 2>&1; then
     apt-get update
     apt-get install -y grub-common grub-pc grub-efi-amd64 shim-signed || true
@@ -267,13 +298,14 @@ elif command -v xbps-install >/dev/null 2>&1; then
     xbps-install -Sy grub efibootmgr || true
 fi
 
-if [[ \"$FIRMWARE\" == \"uefi\" ]]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
+# Install GRUB
+if [ -d /sys/firmware/efi ]; then
+    \$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
 else
-    grub-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
+    \$GRUB_INSTALL_CMD --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
 fi
 
-grub-mkconfig -o /boot/grub/grub.cfg || echo 'WARNING: grub-mkconfig failed.'
+\$GRUB_MKCONFIG_CMD -o /boot/grub/grub.cfg || echo 'WARNING: grub config generation failed.'
 "
 
 # Cleanup

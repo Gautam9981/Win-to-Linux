@@ -14,24 +14,87 @@ if [[ "$EUID" -ne 0 ]]; then
     exit 1
 fi
 
-# Install dependencies based on available package manager
-install_deps() {
-    local deps=(curl rsync squashfs-tools grub2 grub-common grub-pc grub-efi grub2-common parted dosfstools e2fsprogs)
+# Parse CLI args early for TARGET_DISTRO, needed in install_deps
+TARGET_DISTRO=""
+TARGET_PARTITION=""
+DOWNLOAD_DIR="/root/Downloads"
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --to) TARGET_DISTRO="${2,,}"; shift 2 ;;
+        --partition) TARGET_PARTITION="$2"; shift 2 ;;
+        --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
+        *) echo "Unknown parameter: $1"; exit 1 ;;
+    esac
+done
+
+if [[ -z "$TARGET_DISTRO" || -z "$TARGET_PARTITION" ]]; then
+    echo "ERROR: --to and --partition parameters are required."
+    exit 1
+fi
+
+# Detect firmware (UEFI vs BIOS) early for dependency decisions
+detect_firmware() {
+    if [ -d /sys/firmware/efi ]; then
+        echo "uefi"
+    else
+        echo "bios"
+    fi
+}
+FIRMWARE=$(detect_firmware)
+
+# Install dependencies based on available package manager and detected firmware
+install_deps() {
     echo "Detecting package manager..."
+
     if command -v apt-get >/dev/null 2>&1; then
         echo "Using apt-get"
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y "${deps[@]}"
+
+        # Install common dependencies
+        apt-get install -y curl rsync squashfs-tools parted dosfstools e2fsprogs || {
+            echo "ERROR: Failed installing basic dependencies."
+            exit 1
+        }
+
+        # Install grub package based on distro and firmware
+        if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
+            if [[ "$FIRMWARE" == "uefi" ]]; then
+                if ! apt-get install -y grub-efi-amd64; then
+                    echo "WARNING: grub-efi-amd64 installation failed. You may need to install it manually."
+                fi
+            else
+                if ! apt-get install -y grub-pc; then
+                    echo "WARNING: grub-pc installation failed. You may need to install it manually."
+                fi
+            fi
+        else
+            # For other distros, install a broad grub package list
+            if ! apt-get install -y grub2 grub-common grub-pc grub-efi grub2-common; then
+                echo "WARNING: grub package installation failed. You may need to install it manually."
+            fi
+        fi
+
     elif command -v dnf >/dev/null 2>&1; then
         echo "Using dnf"
-        dnf install -y "${deps[@]}"
+        dnf install -y curl rsync squashfs-tools grub2 parted dosfstools e2fsprogs || {
+            echo "ERROR: Failed installing dependencies via dnf."
+            exit 1
+        }
+
     elif command -v pacman >/dev/null 2>&1; then
         echo "Using pacman"
-        pacman -Sy --noconfirm "${deps[@]}"
+        pacman -Sy --noconfirm curl rsync squashfs-tools grub parted dosfstools e2fsprogs || {
+            echo "ERROR: Failed installing dependencies via pacman."
+            exit 1
+        }
+
     elif command -v xbps-install >/dev/null 2>&1; then
         echo "Using xbps-install"
-        xbps-install -Sy "${deps[@]}"
+        xbps-install -Sy curl rsync squashfs-tools grub parted dosfstools e2fsprogs || {
+            echo "ERROR: Failed installing dependencies via xbps-install."
+            exit 1
+        }
     else
         echo "ERROR: No supported package manager found to install dependencies."
         echo "Please install curl, rsync, squashfs-tools, grub, parted, dosfstools, e2fsprogs manually."
@@ -53,25 +116,6 @@ check_command() {
 for cmd in curl rsync unsquashfs grub-install grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4; do
     check_command "$cmd"
 done
-
-# Parse CLI args
-TARGET_DISTRO=""
-TARGET_PARTITION=""
-DOWNLOAD_DIR="/root/Downloads"
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --to) TARGET_DISTRO="${2,,}"; shift 2 ;;
-        --partition) TARGET_PARTITION="$2"; shift 2 ;;
-        --download-dir) DOWNLOAD_DIR="$2"; shift 2 ;;
-        *) echo "Unknown parameter: $1"; exit 1 ;;
-    esac
-done
-
-if [[ -z "$TARGET_DISTRO" || -z "$TARGET_PARTITION" ]]; then
-    echo "ERROR: --to and --partition parameters are required."
-    exit 1
-fi
 
 mkdir -p "$DOWNLOAD_DIR"
 
@@ -114,19 +158,6 @@ mkdir -p "$ISO_MOUNT"
 echo "Mounting ISO to $ISO_MOUNT..."
 mount -o loop "$ISO_FILE" "$ISO_MOUNT"
 echo "ISO mounted."
-
-# Detect firmware (UEFI vs BIOS)
-detect_firmware() {
-    if [ -d /sys/firmware/efi ]; then
-        echo "UEFI detected."
-        echo "uefi"
-    else
-        echo "BIOS detected."
-        echo "bios"
-    fi
-}
-
-FIRMWARE=$(detect_firmware)
 
 # Partitioning
 
@@ -232,31 +263,35 @@ else
     exit 1
 fi
 
-# Bind mount necessary filesystems for chroot
-for fs in proc sys dev; do
-    mount --bind /$fs /mnt/target/$fs
-done
+echo "Filesystem extracted."
 
-# Setup chroot environment (resolv.conf, hostname)
-cp /etc/resolv.conf /mnt/target/etc/resolv.conf || true
-echo "$TARGET_DISTRO" > /mnt/target/etc/hostname || true
-
-# Install GRUB bootloader and generate config
+# Install GRUB bootloader
 
 echo "Installing GRUB bootloader..."
 
 if [[ "$FIRMWARE" == "uefi" ]]; then
+    # Mount necessary pseudo filesystems for chroot
+    for fs in proc sys dev; do
+        mount --bind /$fs /mnt/target/$fs
+    done
+
     echo "Installing GRUB EFI..."
-    chroot /mnt/target grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy
+    if ! chroot /mnt/target grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy; then
+        echo "WARNING: grub-install failed. You may need to fix the EFI bootloader manually."
+    fi
 
     echo "Generating GRUB config..."
     chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
+
+    # Unmount pseudo filesystems
+    for fs in proc sys dev; do
+        umount /mnt/target/$fs
+    done
 else
     echo "Installing GRUB BIOS..."
-    grub-install --boot-directory=/mnt/target/boot "$DISK"
-
-    echo "Generating GRUB config inside chroot..."
-    chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
+    if ! grub-install --boot-directory=/mnt/target/boot "$DISK"; then
+        echo "WARNING: grub-install failed. You may need to fix the BIOS bootloader manually."
+    fi
 
     echo ""
     echo "IMPORTANT:"
@@ -265,13 +300,14 @@ else
     echo ""
 fi
 
-# Cleanup mounts
-for fs in proc sys dev; do
-    umount /mnt/target/$fs
-done
+# Cleanup
 
-umount "$ISO_MOUNT"
+echo "Cleaning up mounts..."
 umount /mnt/target/boot/efi 2>/dev/null || true
-umount /mnt/target
+umount /mnt/target 2>/dev/null || true
+umount "$ISO_MOUNT"
+rmdir "$ISO_MOUNT" 2>/dev/null || true
 
-echo "Migration complete! Reboot to boot into your new $TARGET_DISTRO system."
+echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
+
+exit 0

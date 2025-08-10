@@ -148,8 +148,8 @@ boot
     "fedora" {
         $grubCode = @"
 set root=(hd0,gpt4)   # adjust to match FAT32 partition
-linux /$kernelName root=live:CDLABEL=$labelUpper rd.live.dir=/LiveOS rd.live.image nomodeset
-initrd /$initrdName
+linux /boot/x86_64/loader/linux root=live:CDLABEL=$labelUpper rd.live.dir=/LiveOS rd.live.image nomodeset
+initrd /boot/x86_64/loader/initrd
 boot
 "@
     }
@@ -171,3 +171,4 @@ Write-Host "=============================================="
 Write-Host "1. Open Grub2Win → Manage Boot Menu → Add New Entry → Custom Code"
 Write-Host "2. Paste above code, adjust (hd0,gptX) if needed."
 Write-Host "3. Save & reboot."
+

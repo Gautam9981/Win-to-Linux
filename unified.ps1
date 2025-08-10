@@ -37,6 +37,8 @@ switch ($distroChoice) {
     default { Write-Error "Invalid selection."; exit 1 }
 }
 
+# Make uppercase label
+$labelUpper = $distro.ToUpper()
 $fileSystemType = "FAT32"
 $downloadsFolder = Join-Path $env:USERPROFILE "Downloads"
 $isoPath = Join-Path $downloadsFolder "$distro.iso"
@@ -86,9 +88,8 @@ try {
     $diskImage = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
     Start-Sleep -Seconds 3
     $isoVolume = ($diskImage | Get-Volume)
-    $isoLabel = $isoVolume.FileSystemLabel
     $isoDriveLetter = $isoVolume.DriveLetter + ":"
-    Write-Host "ISO mounted as drive $isoDriveLetter with label $isoLabel"
+    Write-Host "ISO mounted as drive $isoDriveLetter"
 } catch {
     Write-Error "Could not mount ISO."
     exit 1
@@ -103,11 +104,11 @@ if ($volume.SizeRemaining -lt ($totalShrinkGB * 1GB)) { Write-Error "Not enough 
 Resize-Partition -DriveLetter 'C' -Size ($volume.Size - ($totalShrinkGB * 1GB)) -ErrorAction Stop
 Write-Host "C: shrunk successfully."
 
-# === Create ISO Partition ===
+# === Create ISO Partition with uppercase label ===
 $disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
-Write-Host "Creating $fileSystemType partition..."
+Write-Host "Creating $fileSystemType partition with label $labelUpper..."
 $part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
-Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $isoLabel -Confirm:$false
+Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
 $newDrive = ($part | Get-Volume).DriveLetter + ":"
 
 # === Copy ISO contents ===
@@ -121,35 +122,49 @@ Dismount-DiskImage -ImagePath $isoPath
 # === Auto-detect kernel/initrd ===
 $kernel = Get-ChildItem -Path $newDrive -Recurse -Include "vmlinuz*" | Select-Object -First 1
 $initrd = Get-ChildItem -Path $newDrive -Recurse -Include "initrd*" | Select-Object -First 1
-if (-not $kernel) { $kernelName = "vmlinuz" } else { $kernelName = $kernel.FullName.Replace("$newDrive\", "") }
-if (-not $initrd) { $initrdName = "initrd" } else { $initrdName = $initrd.FullName.Replace("$newDrive\", "") }
+
+# Clean paths to relative inside partition, using forward slashes
+if (-not $kernel) { 
+    $kernelName = "vmlinuz" 
+} else { 
+    $kernelName = $kernel.FullName.Replace("$newDrive\", "").Replace('\','/') 
+}
+if (-not $initrd) { 
+    $initrdName = "initrd" 
+} else { 
+    $initrdName = $initrd.FullName.Replace("$newDrive\", "").Replace('\','/') 
+}
 
 # === Grub2Win Code Output ===
-$grubCode = @"
-set root='(hd0,gpt4)'   # adjust to match FAT32 partition
-linux /$kernelName boot=casper live-media-path=/casper noprompt quiet splash ---
+switch ($distro) {
+    "ubuntu" {
+        $grubCode = @"
+set root=(hd0,gpt4)   # adjust to match FAT32 partition
+linux /$kernelName boot=casper live-media-path=/casper cdrom-detect/try-usb=true iso-scan/filename=/$labelUpper noprompt quiet splash ---
 initrd /$initrdName
 boot
 "@
-if ($distro -eq "fedora") {
-    $grubCode = @"
-set root='(hd0,gpt4)'   # adjust to match FAT32 partition
-linux /$kernelName root=live:CDLABEL=$isoLabel rd.live.dir=/LiveOS rd.live.image nomodeset
+    }
+    "fedora" {
+        $grubCode = @"
+set root=(hd0,gpt4)   # adjust to match FAT32 partition
+linux /$kernelName root=live:CDLABEL=$labelUpper rd.live.dir=/LiveOS rd.live.image nomodeset
 initrd /$initrdName
 boot
 "@
-}
-if ($distro -eq "mint") {
-    $grubCode = @"
-set root='(hd0,gpt4)'   # adjust to match FAT32 partition
+    }
+    "mint" {
+        $grubCode = @"
+set root=(hd0,gpt4)   # adjust to match FAT32 partition
 linux /$kernelName boot=casper quiet splash ---
 initrd /$initrdName
 boot
 "@
+    }
 }
 
 Write-Host "`n=============================================="
-Write-Host "Grub2Win Custom Code for $distro"
+Write-Host "Grub2Win Custom Code for $distro ($labelUpper)"
 Write-Host "=============================================="
 Write-Host $grubCode
 Write-Host "=============================================="

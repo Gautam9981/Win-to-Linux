@@ -110,39 +110,50 @@ mkdir -p /mnt/target
 mount "$TARGET_PARTITION" /mnt/target
 echo "Partition mounted."
 
+# Function to detect squashfs image path based on distro
+detect_squashfs() {
+    local base="$1"
+    declare -a candidates=()
+    case "$TARGET_DISTRO" in
+        fedora)
+            candidates=("$base/LiveOS/squashfs.img" "$base/LiveOS/rootfs.img")
+            ;;
+        ubuntu|mint)
+            candidates=("$base/casper/filesystem.squashfs" "$base/casper/filesystem.img")
+            ;;
+        arch)
+            candidates=("$base/arch/boot/x86_64/airootfs.sfs")
+            ;;
+        void)
+            candidates=("$base/LiveOS/squashfs.img" "$base/livefs.squashfs" "$base/squashfs.img")
+            ;;
+        *)
+            echo "ERROR: Unsupported distro for squashfs detection."
+            exit 1
+            ;;
+    esac
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
 # Extract filesystem
 echo "Extracting live filesystem for $TARGET_DISTRO..."
 
-case "$TARGET_DISTRO" in
-    fedora)
-        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
-        ;;
-    ubuntu|mint)
-        SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
-        ;;
-    arch)
-        # For Arch, copy files except airootfs.sfs, then extract it
-        rsync -aHAX --exclude=/arch/boot/x86_64/airootfs.sfs "$ISO_MOUNT/" /mnt/target/
-        SQUASH="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
-        ;;
-    void)
-        SQUASH="$ISO_MOUNT/livefs.squashfs"
-        ;;
-    *)
-        echo "ERROR: Unsupported distro extraction logic."
-        exit 1
-        ;;
-esac
-
-if [[ -f "$SQUASH" ]]; then
-    echo "Extracting $SQUASH..."
-    unsquashfs -f -d /mnt/target "$SQUASH"
-else
-    echo "ERROR: Expected squashfs image not found at $SQUASH"
+SQUASH=$(detect_squashfs "$ISO_MOUNT")
+if [[ -z "$SQUASH" ]]; then
+    echo "ERROR: Could not find squashfs image for $TARGET_DISTRO in $ISO_MOUNT."
     exit 1
 fi
 
-echo "Filesystem extracted."
+echo "Using squashfs image at: $SQUASH"
+echo "Extracting $SQUASH..."
+unsquashfs -f -d /mnt/target "$SQUASH"
 
 DISK=$(lsblk -no pkname "$TARGET_PARTITION")
 if [[ -z "$DISK" ]]; then
@@ -190,4 +201,3 @@ rmdir "$ISO_MOUNT"
 echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
 
 exit 0
-

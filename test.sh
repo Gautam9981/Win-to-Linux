@@ -258,9 +258,9 @@ elif command -v xbps-install >/dev/null 2>&1; then
 fi
 
 if [[ \"$FIRMWARE\" == \"uefi\" ]]; then
-    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
+    grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
 else
-    grub-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
+    grub2-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
 fi
 
 grub-mkconfig -o /boot/grub/grub.cfg || echo 'WARNING: grub-mkconfig failed.'

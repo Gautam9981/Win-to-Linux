@@ -38,7 +38,7 @@ if [[ ! -b "$TARGET_DISK" ]]; then
     exit 1
 fi
 
-# Detect firmware (UEFI vs BIOS) early for dependency decisions
+# Detect firmware (UEFI vs BIOS)
 detect_firmware() {
     if [ -d /sys/firmware/efi ]; then
         echo "uefi"
@@ -57,34 +57,24 @@ install_deps() {
         echo "Using apt-get"
         apt-get update
 
-        # Install common dependencies
         apt-get install -y curl rsync squashfs-tools parted dosfstools e2fsprogs || {
             echo "ERROR: Failed installing basic dependencies."
             exit 1
         }
 
-        # Special handling for grub on Ubuntu/Mint due to grub-efi-amd64 issues
         if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" ]]; then
-            echo "Installing grub EFI/BIOS packages for $TARGET_DISTRO"
-
             if [[ "$FIRMWARE" == "uefi" ]]; then
-                # Install necessary EFI packages
                 apt-get install -y shim-signed grub-efi-amd64-signed grub-efi-amd64 || true
-
-                # Try fixing broken dependencies
                 apt-get install -f -y || true
-
-                # Retry grub packages install to fix potential dependency issues
                 if ! apt-get install -y grub-efi-amd64; then
-                    echo "WARNING: grub-efi-amd64 installation failed. You may need to install it manually."
+                    echo "WARNING: grub-efi-amd64 installation failed."
                 fi
             else
                 if ! apt-get install -y grub-pc; then
-                    echo "WARNING: grub-pc installation failed. You may need to install it manually."
+                    echo "WARNING: grub-pc installation failed."
                 fi
             fi
         else
-            # For other distros, install a broad grub package list if apt-get available
             apt-get install -y grub2 grub-common grub-pc grub-efi grub2-common || true
         fi
 
@@ -117,11 +107,11 @@ install_deps() {
 
 install_deps
 
-# Check that required commands exist after install
+# Check required commands after install
 check_command() {
     local cmd="$1"
     if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "ERROR: Required command '$cmd' not found even after installation."
+        echo "ERROR: Required command '$cmd' not found after installation."
         exit 1
     fi
 }
@@ -148,7 +138,6 @@ fi
 ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
 ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
 
-# Download ISO if missing
 if [[ -f "$ISO_FILE" ]]; then
     echo "ISO already exists at $ISO_FILE. Skipping download."
 else
@@ -172,39 +161,73 @@ echo "Mounting ISO to $ISO_MOUNT..."
 mount -o loop "$ISO_FILE" "$ISO_MOUNT"
 echo "ISO mounted."
 
-# Partitioning
+# Prompt user: erase whole disk or use partitions
+echo
+echo "Disk preparation options:"
+echo "1) Erase whole disk '$TARGET_DISK' and create partitions"
+echo "2) Use existing partitions on '$TARGET_DISK'"
+read -rp "Select option [1 or 2]: " disk_option
 
-echo "WARNING: This will ERASE ALL DATA on disk $TARGET_DISK!"
-read -rp "Type YES to continue partitioning $TARGET_DISK: " confirm
-if [[ "$confirm" != "YES" ]]; then
-    echo "Aborted by user."
-    exit 1
-fi
+EFI_PARTITION=""
+ROOT_PARTITION=""
 
-echo "Creating new partition table on $TARGET_DISK..."
-if [[ "$FIRMWARE" == "uefi" ]]; then
-    parted -s "$TARGET_DISK" mklabel gpt
-else
-    parted -s "$TARGET_DISK" mklabel msdos
-fi
+if [[ "$disk_option" == "1" ]]; then
+    echo "WARNING: This will ERASE ALL DATA on disk $TARGET_DISK!"
+    read -rp "Type YES to confirm erasing $TARGET_DISK: " confirm
+    if [[ "$confirm" != "YES" ]]; then
+        echo "Aborted by user."
+        exit 1
+    fi
 
-if [[ "$FIRMWARE" == "uefi" ]]; then
-    echo "Creating EFI System Partition and Linux root partition on $TARGET_DISK..."
-    parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
-    parted -s "$TARGET_DISK" set 1 boot on
-    parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
-    # Support for disks named like /dev/sdX or /dev/nvme0n1
-    if [[ "$TARGET_DISK" =~ nvme ]]; then
-        EFI_PARTITION="${TARGET_DISK}p1"
-        ROOT_PARTITION="${TARGET_DISK}p2"
+    echo "Creating new partition table on $TARGET_DISK..."
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        parted -s "$TARGET_DISK" mklabel gpt
+        echo "Creating EFI System Partition and Linux root partition on $TARGET_DISK..."
+        parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
+        parted -s "$TARGET_DISK" set 1 boot on
+        parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
     else
-        EFI_PARTITION="${TARGET_DISK}1"
-        ROOT_PARTITION="${TARGET_DISK}2"
+        parted -s "$TARGET_DISK" mklabel msdos
+        echo "Creating single Linux root partition on $TARGET_DISK..."
+        parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%
+    fi
+
+    # Determine partition names (handle /dev/sdX vs /dev/nvmeXn1 style)
+    if [[ "$TARGET_DISK" =~ nvme ]]; then
+        if [[ "$FIRMWARE" == "uefi" ]]; then
+            EFI_PARTITION="${TARGET_DISK}p1"
+            ROOT_PARTITION="${TARGET_DISK}p2"
+        else
+            ROOT_PARTITION="${TARGET_DISK}p1"
+        fi
+    else
+        if [[ "$FIRMWARE" == "uefi" ]]; then
+            EFI_PARTITION="${TARGET_DISK}1"
+            ROOT_PARTITION="${TARGET_DISK}2"
+        else
+            ROOT_PARTITION="${TARGET_DISK}1"
+        fi
+    fi
+
+elif [[ "$disk_option" == "2" ]]; then
+    echo "Using existing partitions."
+
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        read -rp "Enter EFI partition device (e.g. /dev/sda1): " EFI_PARTITION
+        if [[ ! -b "$EFI_PARTITION" ]]; then
+            echo "ERROR: EFI partition device '$EFI_PARTITION' is not valid."
+            exit 1
+        fi
+    fi
+
+    read -rp "Enter root partition device (e.g. /dev/sda2): " ROOT_PARTITION
+    if [[ ! -b "$ROOT_PARTITION" ]]; then
+        echo "ERROR: Root partition device '$ROOT_PARTITION' is not valid."
+        exit 1
     fi
 else
-    echo "Creating single Linux root partition on $TARGET_DISK..."
-    parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%
-    ROOT_PARTITION="${TARGET_DISK}1"
+    echo "Invalid selection."
+    exit 1
 fi
 
 echo "Formatting partitions..."
@@ -217,16 +240,14 @@ mkfs.ext4 -F -L ROOT "$ROOT_PARTITION"
 echo "Mounting target partition(s)..."
 mkdir -p /mnt/target
 
+mount "$ROOT_PARTITION" /mnt/target
+
 if [[ "$FIRMWARE" == "uefi" ]]; then
-    mount "$ROOT_PARTITION" /mnt/target
     mkdir -p /mnt/target/boot/efi
     mount "$EFI_PARTITION" /mnt/target/boot/efi
-else
-    mount "$ROOT_PARTITION" /mnt/target
 fi
 
 # Extract filesystem
-
 echo "Extracting live filesystem for $TARGET_DISTRO..."
 
 case "$TARGET_DISTRO" in
@@ -237,77 +258,66 @@ case "$TARGET_DISTRO" in
         SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
         ;;
     arch)
-        # Copy everything except the compressed rootfs, then extract it separately
-        rsync -aHAX --exclude=/arch/boot/x86_64/airootfs.sfs "$ISO_MOUNT/" /mnt/target/
-        SQUASH="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
+        echo "Copying Arch Linux files except rootfs is usually not squashfs but livefs..."
+        # Arch ISO uses a compressed root filesystem, extract from rootfs.img
+        SQUASH="$ISO_MOUNT/arch/x86_64/airootfs.sfs"
+        if [[ ! -f "$SQUASH" ]]; then
+            SQUASH="$ISO_MOUNT/arch/airootfs.sfs"
+        fi
         ;;
     void)
-        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
+        # Void ISO often has base rootfs tarball instead of squashfs
+        echo "Downloading minimal Void rootfs tarball instead of squashfs..."
+        VOID_ROOTFS_URL="https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.tar.xz"
+        ROOTFS_TARBALL="$DOWNLOAD_DIR/void-rootfs.tar.xz"
+        if [[ ! -f "$ROOTFS_TARBALL" ]]; then
+            curl -L --fail --progress-bar -o "$ROOTFS_TARBALL" "$VOID_ROOTFS_URL"
+        fi
         ;;
     *)
-        echo "ERROR: Unsupported distro extraction logic."
+        echo "Unsupported distro $TARGET_DISTRO for filesystem extraction."
         exit 1
         ;;
 esac
 
-mkdir -p /mnt/target/proc /mnt/target/sys /mnt/target/dev
-
-if [[ -f "$SQUASH" ]]; then
-    echo "Extracting squashfs $SQUASH to /mnt/target ..."
-    unsquashfs -f -d /mnt/target "$SQUASH"
+if [[ "$TARGET_DISTRO" == "void" ]]; then
+    echo "Extracting Void rootfs tarball..."
+    tar -xJf "$ROOTFS_TARBALL" -C /mnt/target
 else
-    echo "ERROR: Expected squashfs image not found at $SQUASH"
-    exit 1
+    echo "Extracting squashfs from $SQUASH ..."
+    unsquashfs -f -d /mnt/target "$SQUASH"
 fi
 
-echo "Filesystem extracted."
+# Mount necessary pseudo filesystems for chroot grub install
+mount --bind /dev /mnt/target/dev
+mount --bind /proc /mnt/target/proc
+mount --bind /sys /mnt/target/sys
 
-# Install GRUB bootloader
+echo "Installing grub bootloader..."
 
-echo "Installing GRUB bootloader..."
+# grub-install inside chroot with correct target
+if [[ "$FIRMWARE" == "uefi" ]]; then
+    mount --bind /sys/firmware/efi/efivars /mnt/target/sys/firmware/efi/efivars || true
+    chroot /mnt/target /bin/bash -c "
+        grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || true
+        grub-mkconfig -o /boot/grub/grub.cfg || true
+    "
+else
+    chroot /mnt/target /bin/bash -c "
+        grub-install --target=i386-pc --recheck $TARGET_DISK || true
+        grub-mkconfig -o /boot/grub/grub.cfg || true
+    "
+fi
+
+# Cleanup mounts
+umount /mnt/target/dev
+umount /mnt/target/proc
+umount /mnt/target/sys
 
 if [[ "$FIRMWARE" == "uefi" ]]; then
-    # Ensure pseudo-filesystem mount points exist (redundant but safe)
-    mkdir -p /mnt/target/proc /mnt/target/sys /mnt/target/dev
-
-    # Mount necessary pseudo filesystems for chroot
-    for fs in proc sys dev; do
-        mount --bind /$fs /mnt/target/$fs
-    done
-
-    echo "Installing GRUB EFI..."
-    if ! chroot /mnt/target grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy; then
-        echo "WARNING: grub-install failed. You may need to fix the EFI bootloader manually."
-    fi
-
-    echo "Generating GRUB config..."
-    chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
-
-    # Unmount pseudo filesystems
-    for fs in proc sys dev; do
-        umount /mnt/target/$fs
-    done
-else
-    echo "Installing GRUB BIOS..."
-    if ! grub-install --boot-directory=/mnt/target/boot "$TARGET_DISK"; then
-        echo "WARNING: grub-install failed. You may need to fix the BIOS bootloader manually."
-    fi
-
-    echo ""
-    echo "IMPORTANT:"
-    echo "Please boot into your new system after reboot and run:"
-    echo "    sudo grub-mkconfig -o /boot/grub/grub.cfg"
-    echo ""
+    umount /mnt/target/boot/efi
 fi
-
-# Cleanup
-
-echo "Cleaning up mounts..."
-umount /mnt/target/boot/efi 2>/dev/null || true
-umount /mnt/target 2>/dev/null || true
+umount /mnt/target
 umount "$ISO_MOUNT"
-rmdir "$ISO_MOUNT" 2>/dev/null || true
 
-echo "Migration complete! Reboot and select your new $TARGET_DISTRO system."
-
-exit 0
+echo "Migration to $TARGET_DISTRO complete. You can reboot now."

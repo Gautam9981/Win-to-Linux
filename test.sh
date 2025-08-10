@@ -4,21 +4,8 @@ set -euo pipefail
 ##############################
 # Migration Script Usage:
 #
-# Run this script AS ROOT (sudo ./migrate.sh)
-#
-# It downloads the specified distro ISO, prepares a target partition,
-# extracts the live filesystem, and installs GRUB bootloader.
-#
-# Supported distros: fedora, ubuntu, mint, arch, void
-#
-# Example usage:
-#   sudo ./migrate.sh --from fedora --to arch --partition /dev/sda3
-#
-# Parameters:
-#   --from         Source distro (for info only)
-#   --to           Target distro (fedora, ubuntu, mint, arch, void)
-#   --partition    Target partition device (e.g. /dev/sda3)
-#   --download-dir Directory to store downloaded ISOs (default: /root/Downloads)
+# Run as root (sudo ./migrate.sh)
+# Supports fedora, ubuntu, mint, arch, void
 ##############################
 
 # Check for root
@@ -27,15 +14,13 @@ if [[ "$EUID" -ne 0 ]]; then
     exit 1
 fi
 
-# Check required commands
+# Check commands
 check_command() {
     local cmd="$1"
     local pkg="$2"
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: Required command '$cmd' not found."
-        if [[ -n "$pkg" ]]; then
-            echo "Please install package: $pkg"
-        fi
+        [[ -n "$pkg" ]] && echo "Please install package: $pkg"
         exit 1
     fi
 }
@@ -44,6 +29,7 @@ if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     echo "ERROR: Neither curl nor wget found. Please install one of them."
     exit 1
 fi
+
 check_command rsync "rsync"
 check_command unsquashfs "squashfs-tools"
 check_command grub-install "grub2"
@@ -51,10 +37,10 @@ check_command grub-mkconfig "grub2"
 check_command mount "mount"
 check_command umount "umount"
 
-# Default download directory
+# Defaults
 DOWNLOAD_DIR="/root/Downloads"
 
-# Parse CLI arguments
+# Parse CLI args
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --from) SOURCE_DISTRO="${2,,}"; shift 2 ;;
@@ -65,14 +51,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "${TARGET_DISTRO:-}" ]] || [[ -z "${TARGET_PARTITION:-}" ]]; then
+if [[ -z "${TARGET_DISTRO:-}" || -z "${TARGET_PARTITION:-}" ]]; then
     echo "ERROR: --to and --partition parameters are required."
     exit 1
 fi
 
 mkdir -p "$DOWNLOAD_DIR"
 
-# ISO URLs by distro - latest stable versions (2025-08-10)
 declare -A ISO_URLS=(
     [fedora]="https://mirror.arizona.edu/fedora/linux/releases/42/KDE/x86_64/iso/Fedora-KDE-Desktop-Live-42-1.1.x86_64.iso"
     [ubuntu]="https://mirror.math.princeton.edu/pub/ubuntu-iso/releases/24.04.3/release/ubuntu-24.04.3-desktop-amd64.iso"
@@ -89,7 +74,7 @@ fi
 ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
 ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
 
-# Skip download if ISO already exists
+# Download ISO if missing
 if [[ -f "$ISO_FILE" ]]; then
     echo "ISO already exists at $ISO_FILE. Skipping download."
 else
@@ -102,10 +87,16 @@ else
     echo "Download completed: $ISO_FILE"
 fi
 
-# Mount ISO to a temporary mount point
+# Mount ISO
 ISO_MOUNT="/mnt/iso_mount"
+if mountpoint -q "$ISO_MOUNT"; then
+    echo "Unmounting previous ISO mount at $ISO_MOUNT..."
+    umount "$ISO_MOUNT"
+fi
 mkdir -p "$ISO_MOUNT"
+echo "Mounting ISO to $ISO_MOUNT..."
 mount -o loop "$ISO_FILE" "$ISO_MOUNT"
+echo "ISO mounted."
 
 # Prepare target partition
 echo "Unmounting $TARGET_PARTITION if mounted..."
@@ -114,80 +105,84 @@ umount "$TARGET_PARTITION" 2>/dev/null || true
 echo "Formatting $TARGET_PARTITION as ext4..."
 mkfs.ext4 -F "$TARGET_PARTITION"
 
-# Ensure mount point exists
-mkdir -p /mnt/target
-
 echo "Mounting $TARGET_PARTITION to /mnt/target..."
+mkdir -p /mnt/target
 mount "$TARGET_PARTITION" /mnt/target
+echo "Partition mounted."
 
-# Extract filesystem from ISO to target partition
+# Extract filesystem
 echo "Extracting live filesystem for $TARGET_DISTRO..."
 
 case "$TARGET_DISTRO" in
     fedora)
-        FEDORA_SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
-        if [[ ! -f "$FEDORA_SQUASH" ]]; then
-            echo "Fedora squashfs not found at expected location."
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$FEDORA_SQUASH"
+        SQUASH="$ISO_MOUNT/LiveOS/squashfs.img"
         ;;
     ubuntu|mint)
-        UBUNTU_SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
-        if [[ ! -f "$UBUNTU_SQUASH" ]]; then
-            echo "Ubuntu/Mint squashfs not found at expected location."
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$UBUNTU_SQUASH"
+        SQUASH="$ISO_MOUNT/casper/filesystem.squashfs"
         ;;
     arch)
+        # For Arch, copy files except airootfs.sfs, then extract it
         rsync -aHAX --exclude=/arch/boot/x86_64/airootfs.sfs "$ISO_MOUNT/" /mnt/target/
-        AROOTFS="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
-        if [[ -f "$AROOTFS" ]]; then
-            unsquashfs -f -d /mnt/target "$AROOTFS"
-        else
-            echo "Arch root filesystem not found, copying entire ISO contents instead."
-        fi
+        SQUASH="$ISO_MOUNT/arch/boot/x86_64/airootfs.sfs"
         ;;
     void)
-        VOID_SQUASH="$ISO_MOUNT/livefs.squashfs"
-        if [[ ! -f "$VOID_SQUASH" ]]; then
-            echo "Void Linux squashfs not found at expected location."
-            exit 1
-        fi
-        unsquashfs -f -d /mnt/target "$VOID_SQUASH"
+        SQUASH="$ISO_MOUNT/livefs.squashfs"
         ;;
     *)
-        echo "Extraction for $TARGET_DISTRO is not implemented."
+        echo "ERROR: Unsupported distro extraction logic."
         exit 1
         ;;
 esac
 
+if [[ -f "$SQUASH" ]]; then
+    echo "Extracting $SQUASH..."
+    unsquashfs -f -d /mnt/target "$SQUASH"
+else
+    echo "ERROR: Expected squashfs image not found at $SQUASH"
+    exit 1
+fi
+
 echo "Filesystem extracted."
 
-# Mount pseudo filesystems for chroot
-for fs in proc sys dev; do
-    mount --bind /$fs /mnt/target/$fs
-done
-
-# Install GRUB bootloader
 DISK=$(lsblk -no pkname "$TARGET_PARTITION")
 if [[ -z "$DISK" ]]; then
-    echo "Cannot determine disk for partition $TARGET_PARTITION"
+    echo "ERROR: Cannot determine disk for partition $TARGET_PARTITION"
     exit 1
 fi
 DISK="/dev/$DISK"
 
-echo "Installing GRUB on $DISK..."
-chroot /mnt/target grub-install "$DISK"
+# Decide if we chroot or not
+if [[ "$TARGET_DISTRO" == "ubuntu" || "$TARGET_DISTRO" == "mint" || "$TARGET_DISTRO" == "fedora" ]]; then
+    echo "Mounting pseudo filesystems for chroot..."
+    for fs in proc sys dev; do
+        mount --bind /$fs /mnt/target/$fs
+    done
 
-echo "Generating GRUB config..."
-chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
+    echo "Installing GRUB inside chroot on $DISK..."
+    chroot /mnt/target grub-install "$DISK"
+
+    echo "Generating GRUB config inside chroot..."
+    chroot /mnt/target grub-mkconfig -o /boot/grub/grub.cfg
+
+    echo "Cleaning up mounts..."
+    for fs in proc sys dev; do
+        umount /mnt/target/$fs
+    done
+
+else
+    # For arch and void, install grub from host environment and skip chroot
+    echo "Installing GRUB from host environment onto $DISK..."
+    grub-install --boot-directory=/mnt/target/boot "$DISK"
+
+    echo ""
+    echo "IMPORTANT:"
+    echo "For $TARGET_DISTRO, you should boot into your new system after reboot"
+    echo "and run the following command to generate the GRUB configuration:"
+    echo "    sudo grub-mkconfig -o /boot/grub/grub.cfg"
+    echo ""
+fi
 
 # Cleanup
-for fs in proc sys dev; do
-    umount /mnt/target/$fs
-done
 umount /mnt/target
 umount "$ISO_MOUNT"
 rmdir "$ISO_MOUNT"

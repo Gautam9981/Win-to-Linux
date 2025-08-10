@@ -244,6 +244,7 @@ case "$TARGET_DISTRO" in
         ;;
 esac
 
+mkdir -p /mnt/target/proc
 if [[ -f "$SQUASH" ]]; then
     echo "Extracting squashfs $SQUASH to /mnt/target ..."
     unsquashfs -f -d /mnt/target "$SQUASH"

@@ -126,7 +126,17 @@ install_deps() {
 
 install_deps
 
-for cmd in curl rsync unsquashfs grub-install grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
+# Check for grub-install or grub2-install command
+if command -v grub-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD="grub-install"
+elif command -v grub2-install >/dev/null 2>&1; then
+    GRUB_INSTALL_CMD="grub2-install"
+else
+    echo "ERROR: Required command 'grub-install' or 'grub2-install' not found."
+    exit 1
+fi
+
+for cmd in curl rsync unsquashfs grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "ERROR: Required command '$cmd' not found."
         exit 1
@@ -258,9 +268,9 @@ elif command -v xbps-install >/dev/null 2>&1; then
 fi
 
 if [[ \"$FIRMWARE\" == \"uefi\" ]]; then
-    grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
 else
-    grub2-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
+    grub-install --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
 fi
 
 grub-mkconfig -o /boot/grub/grub.cfg || echo 'WARNING: grub-mkconfig failed.'

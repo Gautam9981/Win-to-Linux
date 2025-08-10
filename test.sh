@@ -110,6 +110,7 @@ umount "$TARGET_PARTITION" 2>/dev/null || true
 echo "Formatting $TARGET_PARTITION as ext4..."
 mkfs.ext4 -F "$TARGET_PARTITION"
 
+mkdir -p /mnt/target
 echo "Mounting $TARGET_PARTITION to /mnt/target..."
 mount "$TARGET_PARTITION" /mnt/target
 

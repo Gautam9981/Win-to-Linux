@@ -79,7 +79,7 @@ declare -A ISO_URLS=(
     [ubuntu]="https://mirror.math.princeton.edu/pub/ubuntu-iso/releases/24.04.3/release/ubuntu-24.04.3-desktop-amd64.iso"
     [mint]="https://mirror.math.princeton.edu/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso"
     [arch]="https://mirror.rackspace.com/archlinux/iso/latest/archlinux-x86_64.iso"
-    [void]="https://alpha.de.repo.voidlinux.org/live/current/void-x86_64-musl-live.iso"
+    [void]="https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.iso"
 )
 
 if [[ -z "${ISO_URLS[$TARGET_DISTRO]:-}" ]]; then

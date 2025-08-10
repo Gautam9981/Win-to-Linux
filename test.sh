@@ -64,7 +64,45 @@ detect_firmware() {
 FIRMWARE=$(detect_firmware)
 echo "Detected firmware: $FIRMWARE"
 
-# Function to install dependencies based on the distro
+# Validate necessary tools in live environment
+REQUIRED_CMDS=(curl rsync unsquashfs mount umount parted mkfs.vfat mkfs.ext4 tar)
+GRUB_INSTALL_CMDS=(grub-install grub2-install)
+GRUB_MKCONFIG_CMDS=(grub-mkconfig grub2-mkconfig)
+
+for cmd in "${REQUIRED_CMDS[@]}"; do
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "ERROR: Required command '$cmd' not found in live environment."
+        exit 1
+    fi
+done
+
+# Check grub-install or grub2-install in live environment
+GRUB_INSTALL_CMD=""
+for cmd in "${GRUB_INSTALL_CMDS[@]}"; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        GRUB_INSTALL_CMD="$cmd"
+        break
+    fi
+done
+if [[ -z "$GRUB_INSTALL_CMD" ]]; then
+    echo "ERROR: Required command 'grub-install' or 'grub2-install' not found in live environment."
+    exit 1
+fi
+
+# Check grub-mkconfig or grub2-mkconfig in live environment
+GRUB_MKCONFIG_CMD=""
+for cmd in "${GRUB_MKCONFIG_CMDS[@]}"; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+        GRUB_MKCONFIG_CMD="$cmd"
+        break
+    fi
+done
+if [[ -z "$GRUB_MKCONFIG_CMD" ]]; then
+    echo "ERROR: Required command 'grub-mkconfig' or 'grub2-mkconfig' not found in live environment."
+    exit 1
+fi
+
+# Install dependencies in live environment
 install_deps() {
     echo "Detecting package manager and installing dependencies..."
 
@@ -89,7 +127,7 @@ install_deps() {
         echo "Using dnf (Fedora)"
         BASE_PKGS=(
             curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-            grub2 efibootmgr shim
+            grub2 grub2-tools efibootmgr shim
         )
         dnf install -y "${BASE_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with dnf"
@@ -127,195 +165,220 @@ install_deps() {
 
 install_deps
 
-# Check for grub-install or grub2-install command
-if command -v grub-install >/dev/null 2>&1; then
-    GRUB_INSTALL_CMD="grub-install"
-elif command -v grub2-install >/dev/null 2>&1; then
-    GRUB_INSTALL_CMD="grub2-install"
-else
-    echo "ERROR: Required command 'grub-install' or 'grub2-install' not found."
-    exit 1
-fi
+download_files() {
+    mkdir -p "$DOWNLOAD_DIR"
 
-# Check for grub-mkconfig or grub2-mkconfig command
-if command -v grub-mkconfig >/dev/null 2>&1; then
-    GRUB_MKCONFIG_CMD="grub-mkconfig"
-elif command -v grub2-mkconfig >/dev/null 2>&1; then
-    GRUB_MKCONFIG_CMD="grub2-mkconfig"
-else
-    echo "ERROR: Required command 'grub-mkconfig' or 'grub2-mkconfig' not found."
-    exit 1
-fi
+    case "$TARGET_DISTRO" in
+        fedora)
+            # Fedora 42 KDE Live ISO
+            ISO_NAME="Fedora-KDE-Live-42-1.8-x86_64.iso"
+            URL="https://download.fedoraproject.org/pub/fedora/linux/releases/42/Spins/x86_64/iso/$ISO_NAME"
+            ;;
 
-# Validate necessary tools
-for cmd in curl rsync unsquashfs grub-mkconfig mount umount parted mkfs.vfat mkfs.ext4 tar; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-        echo "ERROR: Required command '$cmd' not found."
-        exit 1
-    fi
-done
+        ubuntu)
+            # Ubuntu 24.04.3 LTS Desktop ISO
+            ISO_NAME="ubuntu-24.04.3-desktop-amd64.iso"
+            URL="http://releases.ubuntu.com/24.04/$ISO_NAME"
+            ;;
 
-mkdir -p "$DOWNLOAD_DIR"
+        mint)
+            # Mint 22.1 Cinnamon ISO
+            ISO_NAME="linuxmint-22.1-cinnamon-64bit.iso"
+            URL="https://mirrors.edge.kernel.org/linuxmint/stable/22.1/$ISO_NAME"
+            ;;
 
-declare -A ISO_URLS=(
-    [fedora]="https://mirror.arizona.edu/fedora/linux/releases/42/KDE/x86_64/iso/Fedora-KDE-Desktop-Live-42-1.1.x86_64.iso"
-    [ubuntu]="https://mirror.math.princeton.edu/pub/ubuntu-iso/releases/24.04.3/release/ubuntu-24.04.3-desktop-amd64.iso"
-    [mint]="https://mirror.math.princeton.edu/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso"
-    [arch]="https://mirror.rackspace.com/archlinux/iso/latest/archlinux-bootstrap-x86_64.tar.gz"
-    [void]="https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.tar.xz"
-)
+        arch)
+            # Arch latest rootfs tarball (official Arch rootfs)
+            ROOTFS_NAME="archlinux-bootstrap-x86_64.tar.gz"
+            URL="https://mirror.rackspace.com/archlinux/iso/latest/$ROOTFS_NAME"
+            ;;
 
-if [[ -z "${ISO_URLS[$TARGET_DISTRO]:-}" ]]; then
-    echo "ERROR: Unsupported target distro '$TARGET_DISTRO'."
-    exit 1
-fi
+        void)
+            # Void latest rootfs tarball
+            # For Void, it's good to check latest URL, here fixed date for example
+            URL="https://repo-default.voidlinux.org/live/current/void-x86_64-ROOTFS-20250202.tar.xz""
+            ;;
+        *)
+            echo "ERROR: Unsupported distro for downloading."
+            exit 1
+            ;;
+    esac
 
-ISO_URL="${ISO_URLS[$TARGET_DISTRO]}"
-ISO_FILE="$DOWNLOAD_DIR/$(basename "$ISO_URL")"
-
-if [[ ! -f "$ISO_FILE" ]]; then
-    echo "Downloading $TARGET_DISTRO ISO/tarball..."
-    curl -L --fail --progress-bar -o "$ISO_FILE" "$ISO_URL" || exit 1
-fi
-
-# Partitioning
-if [[ "$ERASE_MODE" == "whole" ]]; then
-    echo "WARNING: This will ERASE ALL DATA on disk $TARGET_DISK!"
-    read -rp "Type YES to continue: " confirm
-    [[ "$confirm" != "YES" ]] && echo "Aborted." && exit 1
-
-    if [[ "$FIRMWARE" == "uefi" ]]; then
-        parted -s "$TARGET_DISK" mklabel gpt
-        parted -s "$TARGET_DISK" mkpart ESP fat32 1MiB 513MiB
-        parted -s "$TARGET_DISK" set 1 boot on
-        parted -s "$TARGET_DISK" mkpart primary ext4 513MiB 100%
-        EFI_PARTITION="${TARGET_DISK}p1"
-        ROOT_PARTITION="${TARGET_DISK}p2"
+    if [[ "$TARGET_DISTRO" == "arch" || "$TARGET_DISTRO" == "void" ]]; then
+        DOWNLOAD_PATH="$DOWNLOAD_DIR/$ROOTFS_NAME"
     else
-        parted -s "$TARGET_DISK" mklabel msdos
-        parted -s "$TARGET_DISK" mkpart primary ext4 1MiB 100%
-        ROOT_PARTITION="${TARGET_DISK}1"
+        DOWNLOAD_PATH="$DOWNLOAD_DIR/$ISO_NAME"
     fi
-elif [[ "$ERASE_MODE" == "partitions" ]]; then
-    echo "WARNING: This will ERASE data on: $PARTITIONS_TO_ERASE"
-    read -rp "Type YES to continue: " confirm
-    [[ "$confirm" != "YES" ]] && echo "Aborted." && exit 1
 
-    IFS=',' read -ra PART_ARR <<< "$PARTITIONS_TO_ERASE"
-    for p in "${PART_ARR[@]}"; do
-        dd if=/dev/zero of="$p" bs=1M count=10 status=progress || true
+    if [[ -f "$DOWNLOAD_PATH" ]]; then
+        echo "$DOWNLOAD_PATH already exists, skipping download."
+    else
+        echo "Downloading $URL to $DOWNLOAD_PATH..."
+        curl -L --fail -o "$DOWNLOAD_PATH" "$URL" || {
+            echo "ERROR: Download failed for $URL"
+            exit 1
+        }
+    fi
+}
+
+download_files
+
+prepare_filesystem() {
+    echo "Preparing target root filesystem..."
+    mkdir -p /mnt/target
+
+    case "$TARGET_DISTRO" in
+        ubuntu|mint|fedora)
+            echo "Mounting ISO for $TARGET_DISTRO..."
+            if [[ "$TARGET_DISTRO" == "fedora" ]]; then
+                ISO_PATH="$DOWNLOAD_DIR/Fedora-KDE-Live-42-1.8-x86_64.iso"
+            elif [[ "$TARGET_DISTRO" == "ubuntu" ]]; then
+                ISO_PATH="$DOWNLOAD_DIR/ubuntu-24.04.3-desktop-amd64.iso"
+            else
+                ISO_PATH="$DOWNLOAD_DIR/linuxmint-22.1-cinnamon-64bit.iso"
+            fi
+
+            MNT_ISO="/mnt/iso"
+            mkdir -p "$MNT_ISO"
+            mount -o loop "$ISO_PATH" "$MNT_ISO"
+
+            echo "Extracting ISO squashfs contents..."
+            # Try common squashfs locations
+            if ! unsquashfs -f -d /mnt/target "$MNT_ISO"/casper/*.squashfs 2>/dev/null; then
+                if ! unsquashfs -f -d /mnt/target "$MNT_ISO"/LiveOS/*.squashfs 2>/dev/null; then
+
+                    echo "ERROR: Failed to extract ISO squashfs for $TARGET_DISTRO"
+                    umount "$MNT_ISO"
+                    exit 1
+                fi
+            fi
+
+            umount "$MNT_ISO"
+            ;;
+
+        arch)
+            echo "Extracting Arch rootfs tarball..."
+            ROOTFS_PATH="$DOWNLOAD_DIR/archlinux-bootstrap-x86_64.tar.gz"
+            tar -xpf "$ROOTFS_PATH" -C /mnt/target || {
+                echo "ERROR: Failed to extract Arch rootfs"
+                exit 1
+            }
+            ;;
+
+        void)
+            echo "Extracting Void rootfs tarball..."
+            ROOTFS_PATH="$DOWNLOAD_DIR/void-x86_64-musl-ROOTFS-20230820.tar.xz"
+            tar -xpf "$ROOTFS_PATH" -C /mnt/target || {
+                echo "ERROR: Failed to extract Void rootfs"
+                exit 1
+            }
+            ;;
+
+        *)
+            echo "ERROR: Unsupported distro for filesystem preparation."
+            exit 1
+            ;;
+    esac
+}
+
+prepare_filesystem
+
+prepare_chroot() {
+    echo "Preparing chroot environment for GRUB installation..."
+
+    for dir in dev proc sys run boot/efi; do
+        mkdir -p "/mnt/target/$dir"
     done
 
-    if [[ -z "$ROOT_PARTITION" ]]; then
-        echo "ERROR: --root-partition is required with --erase partitions"
-        exit 1
+    mount --bind /dev /mnt/target/dev
+    mount --bind /proc /mnt/target/proc
+    mount --bind /sys /mnt/target/sys
+    mount --bind /run /mnt/target/run
+
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        mount --bind /boot/efi /mnt/target/boot/efi
+    fi
+}
+
+install_grub_in_chroot() {
+    prepare_chroot
+
+    echo "Installing GRUB inside chroot for $TARGET_DISTRO..."
+
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy"
+    else
+        GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --boot-directory=/boot $TARGET_DISK"
     fi
 
-    if [[ "$FIRMWARE" == "uefi" && -z "$EFI_PARTITION" ]]; then
-        echo "ERROR: --efi-partition is required in UEFI mode"
-        exit 1
-    fi
-else
-    echo "ERROR: Invalid --erase mode"
-    exit 1
-fi
+    GRUB_MKCONFIG_CMD_ARGS="$GRUB_MKCONFIG_CMD -o /boot/grub/grub.cfg"
 
-# Format partitions
-echo "Formatting partitions..."
-[[ "$FIRMWARE" == "uefi" ]] && mkfs.vfat -F32 -n EFI "$EFI_PARTITION"
-mkfs.ext4 -F -L ROOT "$ROOT_PARTITION"
-
-# Mount
-echo "Mounting partitions..."
-mkdir -p /mnt/target
-mount "$ROOT_PARTITION" /mnt/target
-[[ "$FIRMWARE" == "uefi" ]] && mkdir -p /mnt/target/boot/efi && mount "$EFI_PARTITION" /mnt/target/boot/efi
-
-# Extract filesystem
-echo "Extracting filesystem..."
-ISO_MOUNT="/mnt/iso_mount"
-mkdir -p "$ISO_MOUNT"
-case "$TARGET_DISTRO" in
-    fedora)
-        mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        unsquashfs -f -d /mnt/target "$ISO_MOUNT/LiveOS/squashfs.img"
-        ;;
-    ubuntu|mint)
-        mount -o loop "$ISO_FILE" "$ISO_MOUNT"
-        unsquashfs -f -d /mnt/target "$ISO_MOUNT/casper/filesystem.squashfs"
-        ;;
-    arch)
-        tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
-        ;;
-    void)
-        tar -xpf "$ISO_FILE" -C /mnt/target --strip-components=1
-        ;;
-    *)
-        echo "ERROR: Unsupported distro."
-        exit 1
-        ;;
-esac
-umount "$ISO_MOUNT"
-rmdir "$ISO_MOUNT"
-
-# Prep for chroot
-for fs in proc sys dev run; do
-    mount --bind /$fs /mnt/target/$fs
-done
-cp /etc/resolv.conf /mnt/target/etc/resolv.conf
-
-# Install GRUB in chroot
-echo "Installing GRUB..."
-chroot /mnt/target /bin/bash -c "
+    case "$TARGET_DISTRO" in
+        void)
+            CHROOT_CMDS=$(cat <<EOF
 set -e
+xbps-install -S xbps
+xbps-install -Syyu
+xbps-install -y grub efibootmgr
+$GRUB_INSTALL_CMD_ARGS
+$GRUB_MKCONFIG_CMD_ARGS
+EOF
+)
+            ;;
 
-# Detect GRUB commands
-if command -v grub-install >/dev/null 2>&1; then
-    GRUB_INSTALL_CMD=grub-install
-elif command -v grub2-install >/dev/null 2>&1; then
-    GRUB_INSTALL_CMD=grub2-install
-else
-    echo 'ERROR: grub-install or grub2-install not found.'
-    exit 1
-fi
+        ubuntu|mint)
+            CHROOT_CMDS=$(cat <<EOF
+set -e
+apt-get update
+apt-get install -y grub-common grub-pc
+$GRUB_INSTALL_CMD_ARGS
+$GRUB_MKCONFIG_CMD_ARGS
+EOF
+)
+            ;;
 
-if command -v grub-mkconfig >/dev/null 2>&1; then
-    GRUB_MKCONFIG_CMD=grub-mkconfig
-elif command -v grub2-mkconfig >/dev/null 2>&1; then
-    GRUB_MKCONFIG_CMD=grub2-mkconfig
-else
-    echo 'ERROR: grub-mkconfig or grub2-mkconfig not found.'
-    exit 1
-fi
+        fedora)
+            CHROOT_CMDS=$(cat <<EOF
+set -e
+dnf install -y grub2 grub2-tools efibootmgr shim
+$GRUB_INSTALL_CMD_ARGS
+$GRUB_MKCONFIG_CMD_ARGS
+EOF
+)
+            ;;
 
-# Install required packages
-if command -v apt-get >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y grub-common grub-pc grub-efi-amd64 shim-signed || true
-elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y grub2 shim efibootmgr || true
-elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm grub efibootmgr || true
-elif command -v xbps-install >/dev/null 2>&1; then
-    xbps-install -Sy grub efibootmgr || true
-fi
+        arch)
+            CHROOT_CMDS=$(cat <<EOF
+set -e
+pacman -Sy --noconfirm grub efibootmgr
+$GRUB_INSTALL_CMD_ARGS
+$GRUB_MKCONFIG_CMD_ARGS
+EOF
+)
+            ;;
 
-# Install GRUB
-if [ -d /sys/firmware/efi ]; then
-    \$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy || echo 'WARNING: EFI grub install failed.'
-else
-    \$GRUB_INSTALL_CMD --boot-directory=/boot \"$TARGET_DISK\" || echo 'WARNING: BIOS grub install failed.'
-fi
+        *)
+            echo "ERROR: Unsupported distro for GRUB installation."
+            exit 1
+            ;;
+    esac
 
-\$GRUB_MKCONFIG_CMD -o /boot/grub/grub.cfg || echo 'WARNING: grub config generation failed.'
-"
+    chroot /mnt/target /bin/bash -c "$CHROOT_CMDS"
 
-# Cleanup
-for fs in run dev sys proc; do
-    umount /mnt/target/$fs || true
-done
-[[ "$FIRMWARE" == "uefi" ]] && umount /mnt/target/boot/efi || true
+    echo "Cleaning up mounts..."
+    umount /mnt/target/dev || true
+    umount /mnt/target/proc || true
+    umount /mnt/target/sys || true
+    umount /mnt/target/run || true
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        umount /mnt/target/boot/efi || true
+    fi
+}
+
+install_grub_in_chroot
+
+echo "Unmounting target root filesystem..."
 umount /mnt/target || true
 
-echo "Migration complete! Reboot into $TARGET_DISTRO."
+echo "Migration complete! You can now reboot into your new system."
 exit 0

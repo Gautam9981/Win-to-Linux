@@ -274,13 +274,23 @@ prepare_chroot() {
     for dir in dev proc sys run boot/efi; do
         mkdir -p "/mnt/target/$dir"
     done
-    mount --bind /dev /mnt/target/dev
-    mount --bind /proc /mnt/target/proc
-    mount --bind /sys /mnt/target/sys
-    mount --bind /run /mnt/target/run
+    echo "Mounting /dev..."
+    mount --bind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --bind /dev"; exit 1; }
+    echo "Mounting /proc..."
+    mount --bind /proc /mnt/target/proc || { echo "ERROR: Failed to mount --bind /proc"; exit 1; }
+    echo "Mounting /sys..."
+    mount --bind /sys /mnt/target/sys || { echo "ERROR: Failed to mount --bind /sys"; exit 1; }
+    echo "Mounting /run..."
+    mount --bind /run /mnt/target/run || { echo "ERROR: Failed to mount --bind /run"; exit 1; }
     if [[ "$FIRMWARE" == "uefi" ]]; then
         mkdir -p /mnt/target/boot/efi
-        mount "$EFI_PARTITION" /mnt/target/boot/efi
+        echo "Mounting EFI partition inside chroot..."
+        mount "$EFI_PARTITION" /mnt/target/boot/efi || { echo "ERROR: Failed to mount EFI partition $EFI_PARTITION inside chroot"; exit 1; }
+    fi
+    # Check that /mnt/target/dev is not empty
+    if [[ -z "$(ls -A /mnt/target/dev 2>/dev/null)" ]]; then
+        echo "ERROR: /mnt/target/dev is empty after mounting. This will cause grub-install to fail."
+        exit 1
     fi
 }
 

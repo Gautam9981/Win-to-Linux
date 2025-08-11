@@ -94,12 +94,59 @@ $isoSizeGB = [math]::Ceiling($isoSizeBytes / 1GB)
 $isoPartitionSizeGB = $isoSizeGB + 1   # +1 GB margin for safety
 Write-Host "Calculated ISO partition size: $isoPartitionSizeGB GB"
 
-# Prompt for Linux space to shrink
-$linuxSpaceGB = Read-Host "Enter how many GB to shrink C: for Linux space (e.g., 150)"
-if (-not ($linuxSpaceGB -as [int])) { Write-Error "Invalid input. Please enter a number."; exit 1 }
-$linuxSpaceGB = [int]$linuxSpaceGB
+# Prompt for Linux space to shrink (can be 0)
+while ($true) {
+    $linuxSpaceInput = Read-Host "Enter how many GB to shrink C: for Linux space (enter 0 to skip shrinking for Linux)"
+    if ([int]::TryParse($linuxSpaceInput, [ref]$null) -and [int]$linuxSpaceInput -ge 0) {
+        $linuxSpaceGB = [int]$linuxSpaceInput
+        break
+    } else {
+        Write-Warning "Invalid input. Please enter a non-negative integer."
+    }
+}
+
 $totalShrinkGB = $linuxSpaceGB + $isoPartitionSizeGB
 $partitionSizeMB = $isoPartitionSizeGB * 1024
+
+# === Shrink C: Drive by totalShrinkGB (Linux + ISO) ===
+Write-Host "Shrinking C: by $totalShrinkGB GB..."
+$cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
+if (-not $cPartition) { Write-Error "C: drive not found."; exit 1 }
+
+$volume = Get-Volume -DriveLetter 'C'
+$totalShrinkBytes = $totalShrinkGB * 1GB
+
+if ($volume.SizeRemaining -lt $totalShrinkBytes) {
+    Write-Error "Not enough free space on C: to shrink by $totalShrinkGB GB."
+    exit 1
+}
+
+try {
+    Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkBytes) -ErrorAction Stop
+    Write-Host "C: shrunk successfully."
+} catch {
+    Write-Error "Failed to shrink C: drive. $_"
+    exit 1
+}
+
+# === Check free unallocated space for ISO partition creation ===
+$disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
+$supportedSize = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $cPartition.PartitionNumber
+
+if ($supportedSize.SizeMax -lt $totalShrinkGB * 1GB) {
+    Write-Error "You can only shrink C: by up to $([math]::Round($supportedSize.SizeMax / 1GB)) GB, which is less than the required $totalShrinkGB GB."
+    exit 1
+}
+
+Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkGB * 1GB)
+
+
+# === Create ISO Partition with uppercase label ===
+Write-Host "Creating $fileSystemType partition with label $labelUpper..."
+$part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
+Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
+$newDriveLetter = ($part | Get-Volume).DriveLetter
+$newDrive = "${newDriveLetter}:"
 
 # === Mount ISO ===
 try {
@@ -114,22 +161,6 @@ try {
     exit 1
 }
 
-# === Shrink C: Drive ===
-Write-Host "Shrinking C: by $totalShrinkGB GB..."
-$cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
-if (-not $cPartition) { Write-Error "C: drive not found."; exit 1 }
-$volume = Get-Volume -DriveLetter 'C'
-if ($volume.SizeRemaining -lt ($totalShrinkGB * 1GB)) { Write-Error "Not enough free space."; exit 1 }
-Resize-Partition -DriveLetter 'C' -Size ($volume.Size - ($totalShrinkGB * 1GB)) -ErrorAction Stop
-Write-Host "C: shrunk successfully."
-
-# === Create ISO Partition with uppercase label ===
-$disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
-Write-Host "Creating $fileSystemType partition with label $labelUpper..."
-$part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
-Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
-$newDrive = ($part | Get-Volume).DriveLetter + ":"
-
 # === Copy ISO contents ===
 Write-Host "Copying ISO contents to $newDrive..."
 Copy-Item -Path "$isoDriveLetter\*" -Destination $newDrive -Recurse -Force
@@ -139,8 +170,8 @@ Write-Host "Unmounting ISO..."
 Dismount-DiskImage -ImagePath $isoPath
 
 # === Auto-detect kernel/initrd ===
-$kernel = Get-ChildItem -Path $newDrive -Recurse -Include "vmlinuz*" | Select-Object -First 1
-$initrd = Get-ChildItem -Path $newDrive -Recurse -Include "initrd*" | Select-Object -First 1
+$kernel = Get-ChildItem -Path $newDrive -Recurse -Include "vmlinuz*" -ErrorAction SilentlyContinue | Select-Object -First 1
+$initrd = Get-ChildItem -Path $newDrive -Recurse -Include "initrd*" -ErrorAction SilentlyContinue | Select-Object -First 1
 
 if (-not $kernel) { 
     $kernelName = "vmlinuz" 
@@ -207,3 +238,4 @@ Write-Host "=============================================="
 Write-Host "1. Open Grub2Win → Manage Boot Menu → Add New Entry → Custom Code"
 Write-Host "2. Paste above code, adjust (hd0,gptX) if needed."
 Write-Host "3. Save & reboot."
+

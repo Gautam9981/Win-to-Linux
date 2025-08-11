@@ -271,11 +271,15 @@ prepare_filesystem
 prepare_chroot() {
     cp /etc/resolv.conf /mnt/target/etc/resolv.conf
     echo "Preparing chroot environment for GRUB installation..."
-    for dir in dev proc sys run boot/efi; do
+    for dir in dev proc sys run boot/efi dev/pts dev/shm; do
         mkdir -p "/mnt/target/$dir"
     done
     echo "Mounting /dev..."
     mount --bind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --bind /dev"; exit 1; }
+    echo "Mounting /dev/pts..."
+    mount --bind /dev/pts /mnt/target/dev/pts || { echo "ERROR: Failed to mount --bind /dev/pts"; exit 1; }
+    echo "Mounting /dev/shm..."
+    mount --bind /dev/shm /mnt/target/dev/shm || { echo "ERROR: Failed to mount --bind /dev/shm"; exit 1; }
     echo "Mounting /proc..."
     mount --bind /proc /mnt/target/proc || { echo "ERROR: Failed to mount --bind /proc"; exit 1; }
     echo "Mounting /sys..."
@@ -291,6 +295,10 @@ prepare_chroot() {
     if [[ -z "$(ls -A /mnt/target/dev 2>/dev/null)" ]]; then
         echo "ERROR: /mnt/target/dev is empty after mounting. This will cause grub-install to fail."
         exit 1
+    fi
+    # Check for block devices in /mnt/target/dev
+    if ! ls /mnt/target/dev/sd* /mnt/target/dev/nvme* /mnt/target/dev/vd* 1>/dev/null 2>&1; then
+        echo "WARNING: No block devices found in /mnt/target/dev (no sd*, nvme*, or vd* nodes). grub-install may fail."
     fi
 }
 

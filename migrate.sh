@@ -11,9 +11,23 @@ set -euo pipefail
 ##############################
 
 # Ensure running as root
+
+# Check if running in a live environment or an installed system
 if [[ "$EUID" -ne 0 ]]; then
     echo "ERROR: This script must be run as root (sudo)."
     exit 1
+fi
+
+# Detect if running in a live environment (no /home or /root is tmpfs or overlay)
+LIVE_ENV=0
+if mount | grep -qE '/dev/loop|/cow|overlay|tmpfs on /root|tmpfs on /home'; then
+    LIVE_ENV=1
+fi
+
+if [[ $LIVE_ENV -eq 0 ]]; then
+    echo "WARNING: You are running this script on an installed system, not a live environment."
+    echo "Some operations (like mounting /dev, /proc, /sys, /run) will be skipped."
+    echo "Make sure you know what you are doing!"
 fi
 
 # Parse CLI args
@@ -271,49 +285,53 @@ prepare_filesystem
 prepare_chroot() {
     cp /etc/resolv.conf /mnt/target/etc/resolv.conf
     echo "Preparing chroot environment for GRUB installation..."
-    for dir in dev proc sys run dev/pts dev/shm; do
-        mkdir -p "/mnt/target/$dir"
-    done
-    # Ensure /dev/console and /dev/tty exist in chroot
-    if [[ ! -e /mnt/target/dev/console ]]; then
-        mknod -m 600 /mnt/target/dev/console c 5 1
-    fi
-    if [[ ! -e /mnt/target/dev/tty ]]; then
-        mknod -m 666 /mnt/target/dev/tty c 5 0
-    fi
-    echo "Mounting /dev with --rbind..."
-    mount --rbind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --rbind /dev"; exit 1; }
-    echo "Mounting /dev/pts..."
-    mount --bind /dev/pts /mnt/target/dev/pts || { echo "ERROR: Failed to mount --bind /dev/pts"; exit 1; }
-    echo "Mounting /dev/shm..."
-    mount --bind /dev/shm /mnt/target/dev/shm || { echo "ERROR: Failed to mount --bind /dev/shm"; exit 1; }
-    echo "Mounting /dev/console..."
-    mount --bind /dev/console /mnt/target/dev/console 2>/dev/null || true
-    echo "Mounting /dev/tty..."
-    mount --bind /dev/tty /mnt/target/dev/tty 2>/dev/null || true
-    echo "Mounting /proc..."
-    mount --bind /proc /mnt/target/proc || { echo "ERROR: Failed to mount --bind /proc"; exit 1; }
-    echo "Mounting /sys..."
-    mount --bind /sys /mnt/target/sys || { echo "ERROR: Failed to mount --bind /sys"; exit 1; }
-    echo "Mounting /run..."
-    mount --bind /run /mnt/target/run || { echo "ERROR: Failed to mount --bind /run"; exit 1; }
-    if [[ "$FIRMWARE" == "uefi" ]]; then
-        mkdir -p /mnt/target/boot/efi
-        echo "Mounting EFI partition inside chroot..."
-        mount "$EFI_PARTITION" /mnt/target/boot/efi || { echo "ERROR: Failed to mount EFI partition $EFI_PARTITION inside chroot"; exit 1; }
-    fi
-    # For BIOS/legacy, trigger udev to populate device nodes
-    if [[ "$FIRMWARE" == "bios" ]]; then
-        chroot /mnt/target /bin/bash -c "command -v udevadm >/dev/null 2>&1 && udevadm trigger && udevadm settle" || true
-    fi
-    # Check that /mnt/target/dev is not empty
-    if [[ -z "$(ls -A /mnt/target/dev 2>/dev/null)" ]]; then
-        echo "ERROR: /mnt/target/dev is empty after mounting. This will cause grub-install to fail."
-        exit 1
-    fi
-    # Check for block devices in /mnt/target/dev
-    if ! ls /mnt/target/dev/sd* /mnt/target/dev/nvme* /mnt/target/dev/vd* 1>/dev/null 2>&1; then
-        echo "WARNING: No block devices found in /mnt/target/dev (no sd*, nvme*, or vd* nodes). grub-install may fail."
+    if [[ $LIVE_ENV -eq 1 ]]; then
+        for dir in dev proc sys run dev/pts dev/shm; do
+            mkdir -p "/mnt/target/$dir"
+        done
+        # Ensure /dev/console and /dev/tty exist in chroot
+        if [[ ! -e /mnt/target/dev/console ]]; then
+            mknod -m 600 /mnt/target/dev/console c 5 1
+        fi
+        if [[ ! -e /mnt/target/dev/tty ]]; then
+            mknod -m 666 /mnt/target/dev/tty c 5 0
+        fi
+        echo "Mounting /dev with --rbind..."
+        mount --rbind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --rbind /dev"; exit 1; }
+        echo "Mounting /dev/pts..."
+        mount --bind /dev/pts /mnt/target/dev/pts || { echo "ERROR: Failed to mount --bind /dev/pts"; exit 1; }
+        echo "Mounting /dev/shm..."
+        mount --bind /dev/shm /mnt/target/dev/shm || { echo "ERROR: Failed to mount --bind /dev/shm"; exit 1; }
+        echo "Mounting /dev/console..."
+        mount --bind /dev/console /mnt/target/dev/console 2>/dev/null || true
+        echo "Mounting /dev/tty..."
+        mount --bind /dev/tty /mnt/target/dev/tty 2>/dev/null || true
+        echo "Mounting /proc..."
+        mount --bind /proc /mnt/target/proc || { echo "ERROR: Failed to mount --bind /proc"; exit 1; }
+        echo "Mounting /sys..."
+        mount --bind /sys /mnt/target/sys || { echo "ERROR: Failed to mount --bind /sys"; exit 1; }
+        echo "Mounting /run..."
+        mount --bind /run /mnt/target/run || { echo "ERROR: Failed to mount --bind /run"; exit 1; }
+        if [[ "$FIRMWARE" == "uefi" ]]; then
+            mkdir -p /mnt/target/boot/efi
+            echo "Mounting EFI partition inside chroot..."
+            mount "$EFI_PARTITION" /mnt/target/boot/efi || { echo "ERROR: Failed to mount EFI partition $EFI_PARTITION inside chroot"; exit 1; }
+        fi
+        # For BIOS/legacy, trigger udev to populate device nodes
+        if [[ "$FIRMWARE" == "bios" ]]; then
+            chroot /mnt/target /bin/bash -c "command -v udevadm >/dev/null 2>&1 && udevadm trigger && udevadm settle" || true
+        fi
+        # Check that /mnt/target/dev is not empty
+        if [[ -z "$(ls -A /mnt/target/dev 2>/dev/null)" ]]; then
+            echo "ERROR: /mnt/target/dev is empty after mounting. This will cause grub-install to fail."
+            exit 1
+        fi
+        # Check for block devices in /mnt/target/dev
+        if ! ls /mnt/target/dev/sd* /mnt/target/dev/nvme* /mnt/target/dev/vd* 1>/dev/null 2>&1; then
+            echo "WARNING: No block devices found in /mnt/target/dev (no sd*, nvme*, or vd* nodes). grub-install may fail."
+        fi
+    else
+        echo "Running in an installed system, skipping bind mounts for /dev, /proc, /sys, /run."
     fi
 }
 

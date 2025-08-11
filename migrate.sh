@@ -271,15 +271,26 @@ prepare_filesystem
 prepare_chroot() {
     cp /etc/resolv.conf /mnt/target/etc/resolv.conf
     echo "Preparing chroot environment for GRUB installation..."
-    for dir in dev proc sys run boot/efi dev/pts dev/shm; do
+    for dir in dev proc sys run dev/pts dev/shm; do
         mkdir -p "/mnt/target/$dir"
     done
-    echo "Mounting /dev..."
-    mount --bind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --bind /dev"; exit 1; }
+    # Ensure /dev/console and /dev/tty exist in chroot
+    if [[ ! -e /mnt/target/dev/console ]]; then
+        mknod -m 600 /mnt/target/dev/console c 5 1
+    fi
+    if [[ ! -e /mnt/target/dev/tty ]]; then
+        mknod -m 666 /mnt/target/dev/tty c 5 0
+    fi
+    echo "Mounting /dev with --rbind..."
+    mount --rbind /dev /mnt/target/dev || { echo "ERROR: Failed to mount --rbind /dev"; exit 1; }
     echo "Mounting /dev/pts..."
     mount --bind /dev/pts /mnt/target/dev/pts || { echo "ERROR: Failed to mount --bind /dev/pts"; exit 1; }
     echo "Mounting /dev/shm..."
     mount --bind /dev/shm /mnt/target/dev/shm || { echo "ERROR: Failed to mount --bind /dev/shm"; exit 1; }
+    echo "Mounting /dev/console..."
+    mount --bind /dev/console /mnt/target/dev/console 2>/dev/null || true
+    echo "Mounting /dev/tty..."
+    mount --bind /dev/tty /mnt/target/dev/tty 2>/dev/null || true
     echo "Mounting /proc..."
     mount --bind /proc /mnt/target/proc || { echo "ERROR: Failed to mount --bind /proc"; exit 1; }
     echo "Mounting /sys..."
@@ -290,6 +301,10 @@ prepare_chroot() {
         mkdir -p /mnt/target/boot/efi
         echo "Mounting EFI partition inside chroot..."
         mount "$EFI_PARTITION" /mnt/target/boot/efi || { echo "ERROR: Failed to mount EFI partition $EFI_PARTITION inside chroot"; exit 1; }
+    fi
+    # For BIOS/legacy, trigger udev to populate device nodes
+    if [[ "$FIRMWARE" == "bios" ]]; then
+        chroot /mnt/target /bin/bash -c "command -v udevadm >/dev/null 2>&1 && udevadm trigger && udevadm settle" || true
     fi
     # Check that /mnt/target/dev is not empty
     if [[ -z "$(ls -A /mnt/target/dev 2>/dev/null)" ]]; then

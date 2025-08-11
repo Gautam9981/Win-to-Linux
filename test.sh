@@ -197,6 +197,21 @@ download_files() {
 }
 download_files
 
+# Mount EFI partition if needed
+if [[ "$FIRMWARE" == "uefi" ]]; then
+    if [[ -z "$EFI_PARTITION" ]]; then
+        echo "ERROR: --efi-partition must be specified in UEFI mode."
+        exit 1
+    fi
+
+    echo "Mounting EFI partition ($EFI_PARTITION) to /mnt/efi..."
+    mkdir -p /mnt/efi
+    mount "$EFI_PARTITION" /mnt/efi || {
+        echo "ERROR: Failed to mount EFI partition $EFI_PARTITION to /mnt/efi"
+        exit 1
+    }
+fi
+
 # Prepare filesystem
 prepare_filesystem() {
     echo "Preparing target root filesystem..."
@@ -263,7 +278,10 @@ prepare_chroot() {
     mount --bind /proc /mnt/target/proc
     mount --bind /sys /mnt/target/sys
     mount --bind /run /mnt/target/run
-    [[ "$FIRMWARE" == "uefi" ]] && mount --bind /boot/efi /mnt/target/boot/efi
+    if [[ "$FIRMWARE" == "uefi" ]]; then
+        mkdir -p /mnt/target/boot/efi
+        mount "$EFI_PARTITION" /mnt/target/boot/efi
+    fi
 }
 
 install_grub_in_chroot() {
@@ -271,7 +289,6 @@ install_grub_in_chroot() {
 
     echo "Installing GRUB inside chroot for $TARGET_DISTRO..."
 
-    # Determine GRUB install commands based on distro and firmware
     if [[ "$FIRMWARE" == "uefi" ]]; then
         if [[ "$TARGET_DISTRO" == "void" ]]; then
             GRUB_INSTALL_CMD_ARGS="grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy"
@@ -293,7 +310,7 @@ install_grub_in_chroot() {
             CHROOT_CMDS=$(cat <<EOF
 set -e
 xbps-install -Sy xbps
-xbps-install -y grub efibootmgr os-prober
+xbps-install -y grub grub-x86_64-efi efibootmgr os-prober
 $GRUB_INSTALL_CMD_ARGS
 $GRUB_MKCONFIG_CMD_ARGS
 EOF
@@ -349,11 +366,15 @@ EOF
     fi
 }
 
-
 install_grub_in_chroot
 
 echo "Unmounting target root filesystem..."
 umount /mnt/target || true
+
+if [[ "$FIRMWARE" == "uefi" ]]; then
+    echo "Unmounting EFI partition from /mnt/efi..."
+    umount /mnt/efi || true
+fi
 
 echo "Migration complete! You can now reboot into your new system."
 exit 0

@@ -1,5 +1,5 @@
 # unified.ps1
-# Ubuntu / Fedora / Mint Prep Script for Grub2Win
+# Ubuntu / Fedora / Mint / Void / Arch Prep Script for Grub2Win
 # Run as Administrator
 
 # === Menu Selection ===
@@ -7,6 +7,8 @@ Write-Host "Select Distro:"
 Write-Host "1) Ubuntu 24.04.3 LTS"
 Write-Host "2) Fedora KDE 42-1.1"
 Write-Host "3) Linux Mint 22.1 Cinnamon"
+Write-Host "4) Void Linux (x86_64 glibc Base)"
+Write-Host "5) Arch Linux"
 $distroChoice = Read-Host "Enter number"
 
 switch ($distroChoice) {
@@ -16,7 +18,6 @@ switch ($distroChoice) {
             "https://mirror.math.princeton.edu/pub/ubuntu-iso/noble/ubuntu-24.04.3-desktop-amd64.iso",
             "https://mirrors.kernel.org/ubuntu-releases/24.04.3/ubuntu-24.04.3-desktop-amd64.iso"
         )
-        $isoPartitionSizeGB = 7
     }
     "2" { 
         $distro = "fedora"
@@ -24,7 +25,6 @@ switch ($distroChoice) {
             "https://mirror.arizona.edu/fedora/linux/releases/42/KDE/x86_64/iso/Fedora-KDE-Desktop-Live-42-1.1.x86_64.iso",
             "https://mirrors.kernel.org/fedora/releases/42/KDE/x86_64/iso/Fedora-KDE-Desktop-Live-42-1.1.x86_64.iso"
         )
-        $isoPartitionSizeGB = 4
     }
     "3" { 
         $distro = "mint"
@@ -32,7 +32,20 @@ switch ($distroChoice) {
             "https://mirrors.ocf.berkeley.edu/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso",
             "https://mirrors.kernel.org/linuxmint/stable/22.1/linuxmint-22.1-cinnamon-64bit.iso"
         )
-        $isoPartitionSizeGB = 4
+    }
+    "4" {
+        $distro = "void"
+        $isoUrls = @(
+            "https://repo-default.voidlinux.org/live/current/void-live-x86_64-20250202-base.iso",
+            "https://mirrors.servercentral.com/voidlinux/live/current/void-live-x86_64-20250202-base.iso"
+        )
+    }
+    "5" {
+        $distro = "arch"
+        $isoUrls = @(
+            "https://mirror.rackspace.com/archlinux/iso/latest/archlinux-x86_64.iso",
+            "https://mirror.archlinux32.org/iso/latest/archlinux-x86_64.iso"
+        )
     }
     default { Write-Error "Invalid selection."; exit 1 }
 }
@@ -74,6 +87,12 @@ if (-not (Test-Path $isoPath)) {
 } else {
     Write-Host "ISO already exists at $isoPath"
 }
+
+# === Dynamically set ISO partition size from file size + margin ===
+$isoSizeBytes = (Get-Item $isoPath).Length
+$isoSizeGB = [math]::Ceiling($isoSizeBytes / 1GB)
+$isoPartitionSizeGB = $isoSizeGB + 1   # +1 GB margin for safety
+Write-Host "Calculated ISO partition size: $isoPartitionSizeGB GB"
 
 # Prompt for Linux space to shrink
 $linuxSpaceGB = Read-Host "Enter how many GB to shrink C: for Linux space (e.g., 150)"
@@ -123,7 +142,6 @@ Dismount-DiskImage -ImagePath $isoPath
 $kernel = Get-ChildItem -Path $newDrive -Recurse -Include "vmlinuz*" | Select-Object -First 1
 $initrd = Get-ChildItem -Path $newDrive -Recurse -Include "initrd*" | Select-Object -First 1
 
-# Clean paths to relative inside partition, using forward slashes
 if (-not $kernel) { 
     $kernelName = "vmlinuz" 
 } else { 
@@ -135,12 +153,14 @@ if (-not $initrd) {
     $initrdName = $initrd.FullName.Replace("$newDrive\", "").Replace('\','/') 
 }
 
+$isoFileName = Split-Path $isoPath -Leaf
+
 # === Grub2Win Code Output ===
 switch ($distro) {
     "ubuntu" {
         $grubCode = @"
 set root=(hd0,gpt4)   # adjust to match FAT32 partition
-linux /$kernelName boot=casper live-media-path=/casper cdrom-detect/try-usb=true iso-scan/filename=/$labelUpper noprompt quiet splash ---
+linux /$kernelName boot=casper noprompt quiet splash ---
 initrd /$initrdName
 boot
 "@
@@ -148,7 +168,7 @@ boot
     "fedora" {
         $grubCode = @"
 set root=(hd0,gpt4)   # adjust to match FAT32 partition
-linux /boot/x86_64/loader/linux root=live:CDLABEL=$labelUpper rd.live.dir=/LiveOS rd.live.image nomodeset
+linux /boot/x86_64/loader/linux root=live:CDLABEL=FEDORA rd.live.dir=/LiveOS rd.live.image nomodeset
 initrd /boot/x86_64/loader/initrd
 boot
 "@
@@ -158,6 +178,22 @@ boot
 set root=(hd0,gpt4)   # adjust to match FAT32 partition
 linux /$kernelName boot=casper quiet splash ---
 initrd /$initrdName
+boot
+"@
+    }
+    "void" {
+        $grubCode = @"
+set root=(hd0,gpt4)   # adjust to match FAT32 partition
+linux /$kernelName root=live:CDLABEL=$labelUpper img_dev=/dev/disk/by-label/$labelUpper img_loop=/$isoFileName
+initrd /$initrdName
+boot
+"@
+    }
+    "arch" {
+        $grubCode = @"
+set root=(hd0,gpt4)   # adjust to match FAT32 partition
+linux /arch/boot/x86_64/vmlinuz-linux archisobasedir=arch archisolabel=$labelUpper
+initrd /arch/boot/x86_64/initramfs-linux.img
 boot
 "@
     }
@@ -171,4 +207,3 @@ Write-Host "=============================================="
 Write-Host "1. Open Grub2Win → Manage Boot Menu → Add New Entry → Custom Code"
 Write-Host "2. Paste above code, adjust (hd0,gptX) if needed."
 Write-Host "3. Save & reboot."
-

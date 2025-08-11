@@ -76,7 +76,7 @@ for cmd in "${REQUIRED_CMDS[@]}"; do
     fi
 done
 
-# Check grub-install or grub2-install in live environment
+# Check grub-install or grub2-install
 GRUB_INSTALL_CMD=""
 for cmd in "${GRUB_INSTALL_CMDS[@]}"; do
     if command -v "$cmd" >/dev/null 2>&1; then
@@ -89,7 +89,7 @@ if [[ -z "$GRUB_INSTALL_CMD" ]]; then
     exit 1
 fi
 
-# Check grub-mkconfig or grub2-mkconfig in live environment
+# Check grub-mkconfig or grub2-mkconfig
 GRUB_MKCONFIG_CMD=""
 for cmd in "${GRUB_MKCONFIG_CMDS[@]}"; do
     if command -v "$cmd" >/dev/null 2>&1; then
@@ -102,22 +102,16 @@ if [[ -z "$GRUB_MKCONFIG_CMD" ]]; then
     exit 1
 fi
 
-# Install dependencies in live environment
+# Install dependencies
 install_deps() {
     echo "Detecting package manager and installing dependencies..."
 
     if command -v apt-get >/dev/null 2>&1; then
         echo "Using apt-get (Debian/Ubuntu/Mint)"
         apt-get update
-
-        BASE_PKGS=(
-            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-        )
+        BASE_PKGS=(curl rsync squashfs-tools parted dosfstools e2fsprogs tar)
         GRUB_PKGS=(grub-common grub-pc)
-        if [[ "$FIRMWARE" == "uefi" ]]; then
-            GRUB_PKGS+=(grub-efi-amd64 shim-signed)
-        fi
-
+        [[ "$FIRMWARE" == "uefi" ]] && GRUB_PKGS+=(grub-efi-amd64 shim-signed)
         apt-get install -y "${BASE_PKGS[@]}" "${GRUB_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with apt-get"
             exit 1
@@ -125,10 +119,7 @@ install_deps() {
 
     elif command -v dnf >/dev/null 2>&1; then
         echo "Using dnf (Fedora)"
-        BASE_PKGS=(
-            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-            grub2 grub2-tools efibootmgr shim
-        )
+        BASE_PKGS=(curl rsync squashfs-tools parted dosfstools e2fsprogs tar grub2 grub2-tools efibootmgr shim)
         dnf install -y "${BASE_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with dnf"
             exit 1
@@ -136,10 +127,7 @@ install_deps() {
 
     elif command -v pacman >/dev/null 2>&1; then
         echo "Using pacman (Arch)"
-        BASE_PKGS=(
-            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-            grub efibootmgr
-        )
+        BASE_PKGS=(curl rsync squashfs-tools parted dosfstools e2fsprogs tar grub efibootmgr)
         pacman -Sy --noconfirm "${BASE_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with pacman"
             exit 1
@@ -147,10 +135,7 @@ install_deps() {
 
     elif command -v xbps-install >/dev/null 2>&1; then
         echo "Using xbps-install (Void Linux)"
-        BASE_PKGS=(
-            curl rsync squashfs-tools parted dosfstools e2fsprogs tar
-            grub efibootmgr
-        )
+        BASE_PKGS=(curl rsync squashfs-tools parted dosfstools e2fsprogs tar grub efibootmgr)
         xbps-install -Sy "${BASE_PKGS[@]}" || {
             echo "ERROR: Failed to install dependencies with xbps-install"
             exit 1
@@ -158,45 +143,35 @@ install_deps() {
 
     else
         echo "ERROR: No supported package manager found to install dependencies."
-        echo "Please install required packages manually."
         exit 1
     fi
 }
-
 install_deps
 
+# Download ISOs/rootfs
 download_files() {
     mkdir -p "$DOWNLOAD_DIR"
 
     case "$TARGET_DISTRO" in
         fedora)
-            # Fedora 42 KDE Live ISO
             ISO_NAME="Fedora-KDE-Live-42-1.8-x86_64.iso"
             URL="https://download.fedoraproject.org/pub/fedora/linux/releases/42/Spins/x86_64/iso/$ISO_NAME"
             ;;
-
         ubuntu)
-            # Ubuntu 24.04.3 LTS Desktop ISO
             ISO_NAME="ubuntu-24.04.3-desktop-amd64.iso"
             URL="http://releases.ubuntu.com/24.04/$ISO_NAME"
             ;;
-
         mint)
-            # Mint 22.1 Cinnamon ISO
             ISO_NAME="linuxmint-22.1-cinnamon-64bit.iso"
             URL="https://mirrors.edge.kernel.org/linuxmint/stable/22.1/$ISO_NAME"
             ;;
-
         arch)
-            # Arch latest rootfs tarball (official Arch rootfs)
             ROOTFS_NAME="archlinux-bootstrap-x86_64.tar.gz"
             URL="https://mirror.rackspace.com/archlinux/iso/latest/$ROOTFS_NAME"
             ;;
-
         void)
-            # Void latest rootfs tarball
-            # For Void, it's good to check latest URL, here fixed date for example
-            URL="https://repo-default.voidlinux.org/live/current/void-x86_64-ROOTFS-20250202.tar.xz""
+            ROOTFS_NAME="void-x86_64-ROOTFS-20250202.tar.xz"
+            URL="https://repo-default.voidlinux.org/live/current/$ROOTFS_NAME"
             ;;
         *)
             echo "ERROR: Unsupported distro for downloading."
@@ -220,9 +195,9 @@ download_files() {
         }
     fi
 }
-
 download_files
 
+# Prepare filesystem
 prepare_filesystem() {
     echo "Preparing target root filesystem..."
     mkdir -p /mnt/target
@@ -230,23 +205,19 @@ prepare_filesystem() {
     case "$TARGET_DISTRO" in
         ubuntu|mint|fedora)
             echo "Mounting ISO for $TARGET_DISTRO..."
-            if [[ "$TARGET_DISTRO" == "fedora" ]]; then
-                ISO_PATH="$DOWNLOAD_DIR/Fedora-KDE-Live-42-1.8-x86_64.iso"
-            elif [[ "$TARGET_DISTRO" == "ubuntu" ]]; then
-                ISO_PATH="$DOWNLOAD_DIR/ubuntu-24.04.3-desktop-amd64.iso"
-            else
-                ISO_PATH="$DOWNLOAD_DIR/linuxmint-22.1-cinnamon-64bit.iso"
-            fi
+            case "$TARGET_DISTRO" in
+                fedora) ISO_PATH="$DOWNLOAD_DIR/Fedora-KDE-Live-42-1.8-x86_64.iso" ;;
+                ubuntu) ISO_PATH="$DOWNLOAD_DIR/ubuntu-24.04.3-desktop-amd64.iso" ;;
+                mint)   ISO_PATH="$DOWNLOAD_DIR/linuxmint-22.1-cinnamon-64bit.iso" ;;
+            esac
 
             MNT_ISO="/mnt/iso"
             mkdir -p "$MNT_ISO"
             mount -o loop "$ISO_PATH" "$MNT_ISO"
 
             echo "Extracting ISO squashfs contents..."
-            # Try common squashfs locations
             if ! unsquashfs -f -d /mnt/target "$MNT_ISO"/casper/*.squashfs 2>/dev/null; then
                 if ! unsquashfs -f -d /mnt/target "$MNT_ISO"/LiveOS/*.squashfs 2>/dev/null; then
-
                     echo "ERROR: Failed to extract ISO squashfs for $TARGET_DISTRO"
                     umount "$MNT_ISO"
                     exit 1
@@ -267,7 +238,7 @@ prepare_filesystem() {
 
         void)
             echo "Extracting Void rootfs tarball..."
-            ROOTFS_PATH="$DOWNLOAD_DIR/void-x86_64-musl-ROOTFS-20230820.tar.xz"
+            ROOTFS_PATH="$DOWNLOAD_DIR/$ROOTFS_NAME"
             tar -xpf "$ROOTFS_PATH" -C /mnt/target || {
                 echo "ERROR: Failed to extract Void rootfs"
                 exit 1
@@ -280,24 +251,19 @@ prepare_filesystem() {
             ;;
     esac
 }
-
 prepare_filesystem
 
 prepare_chroot() {
+    cp /etc/resolv.conf /mnt/target/etc/resolv.conf
     echo "Preparing chroot environment for GRUB installation..."
-
     for dir in dev proc sys run boot/efi; do
         mkdir -p "/mnt/target/$dir"
     done
-
     mount --bind /dev /mnt/target/dev
     mount --bind /proc /mnt/target/proc
     mount --bind /sys /mnt/target/sys
     mount --bind /run /mnt/target/run
-
-    if [[ "$FIRMWARE" == "uefi" ]]; then
-        mount --bind /boot/efi /mnt/target/boot/efi
-    fi
+    [[ "$FIRMWARE" == "uefi" ]] && mount --bind /boot/efi /mnt/target/boot/efi
 }
 
 install_grub_in_chroot() {
@@ -305,10 +271,19 @@ install_grub_in_chroot() {
 
     echo "Installing GRUB inside chroot for $TARGET_DISTRO..."
 
+    # Determine GRUB install commands based on distro and firmware
     if [[ "$FIRMWARE" == "uefi" ]]; then
-        GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy"
+        if [[ "$TARGET_DISTRO" == "void" ]]; then
+            GRUB_INSTALL_CMD_ARGS="grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy"
+        else
+            GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=GRUB --recheck --no-floppy"
+        fi
     else
-        GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --boot-directory=/boot $TARGET_DISK"
+        if [[ "$TARGET_DISTRO" == "void" ]]; then
+            GRUB_INSTALL_CMD_ARGS="grub-install --boot-directory=/boot $TARGET_DISK"
+        else
+            GRUB_INSTALL_CMD_ARGS="$GRUB_INSTALL_CMD --boot-directory=/boot $TARGET_DISK"
+        fi
     fi
 
     GRUB_MKCONFIG_CMD_ARGS="$GRUB_MKCONFIG_CMD -o /boot/grub/grub.cfg"
@@ -317,9 +292,8 @@ install_grub_in_chroot() {
         void)
             CHROOT_CMDS=$(cat <<EOF
 set -e
-xbps-install -S xbps
-xbps-install -Syyu
-xbps-install -y grub efibootmgr
+xbps-install -Sy xbps
+xbps-install -y grub efibootmgr os-prober
 $GRUB_INSTALL_CMD_ARGS
 $GRUB_MKCONFIG_CMD_ARGS
 EOF
@@ -330,7 +304,7 @@ EOF
             CHROOT_CMDS=$(cat <<EOF
 set -e
 apt-get update
-apt-get install -y grub-common grub-pc
+apt-get install -y grub-common grub-pc os-prober
 $GRUB_INSTALL_CMD_ARGS
 $GRUB_MKCONFIG_CMD_ARGS
 EOF
@@ -340,7 +314,7 @@ EOF
         fedora)
             CHROOT_CMDS=$(cat <<EOF
 set -e
-dnf install -y grub2 grub2-tools efibootmgr shim
+dnf install -y grub2 grub2-tools efibootmgr shim os-prober
 $GRUB_INSTALL_CMD_ARGS
 $GRUB_MKCONFIG_CMD_ARGS
 EOF
@@ -350,7 +324,7 @@ EOF
         arch)
             CHROOT_CMDS=$(cat <<EOF
 set -e
-pacman -Sy --noconfirm grub efibootmgr
+pacman -Sy --noconfirm grub efibootmgr os-prober
 $GRUB_INSTALL_CMD_ARGS
 $GRUB_MKCONFIG_CMD_ARGS
 EOF
@@ -374,6 +348,7 @@ EOF
         umount /mnt/target/boot/efi || true
     fi
 }
+
 
 install_grub_in_chroot
 

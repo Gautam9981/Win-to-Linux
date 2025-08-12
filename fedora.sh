@@ -1,44 +1,51 @@
  #!/bin/bash
 set -e
 
-echo "== Fedora Full Disk Wipe + Install =="
+echo "== Fedora Install (Full disk or partitioning) =="
 
 cat <<'EOF'
 
---- Manual Partitioning Instructions ---
+Simplified Manual Partitioning Instructions
 
-If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, follow these steps carefully:
+If you want to manually partition your drive, here’s a quick guide:
 
 1. Boot Fedora Live environment (e.g., Fedora KDE Spin).
-2. Open a terminal and identify your disk with: lsblk
-3. Start parted on your disk (replace /dev/sdX accordingly):
-   sudo parted /dev/sdX
-4. Create a partition table:
-   - For UEFI systems (GPT): mklabel gpt
-   - For Legacy BIOS (MBR): mklabel msdos
+
+2. Open a terminal and identify your disk:
+   lsblk
+
+3. Use a graphical partition tool (recommended for ease):
+   - Open GParted or KDE Partition Manager from the live session menu.
+   - Select your target disk.
+
+4. Create a new partition table:
+   - For UEFI systems: choose GPT.
+   - For Legacy BIOS systems: choose MSDOS.
+
 5. Create partitions:
-   For UEFI/GPT:
-     - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 2048s 1050623s
-       set 1 boot on
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 1050624s <root_end>
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
-   For Legacy BIOS/MBR:
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 2048s <root_end>
-       set 1 boot on
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
-6. Exit parted: quit
-7. Format partitions:
-   - EFI (UEFI only): sudo mkfs.fat -F32 /dev/sdX1
-   - Root: sudo mkfs.ext4 /dev/sdX2 (or /dev/sdX1 for Legacy BIOS)
-   - Swap (if any): sudo mkswap /dev/sdX3 (or /dev/sdX2 for Legacy BIOS) && sudo swapon /dev/sdX3 (or /dev/sdX2)
-8. Mount partitions before installation:
-   sudo mount /dev/sdX2 /mnt (or /dev/sdX1 for Legacy BIOS)
-   sudo mkdir -p /mnt/boot/efi
-   sudo mount /dev/sdX1 /mnt/boot/efi  # UEFI only
 
-Proceed with the installation script after this setup.
+   - UEFI/GPT:
+     - EFI System Partition: 512 MiB, FAT32, set boot flag.
+     - Root Partition: ext4, use remaining space minus swap.
+     - Swap Partition (optional): size as desired.
 
----
+   - Legacy BIOS/MSDOS:
+     - Root Partition: ext4, most of the disk, set boot flag.
+     - Swap Partition (optional): size as desired.
+
+6. Format partitions:
+   - EFI (UEFI only): FAT32
+   - Root: ext4
+   - Swap: linux-swap
+
+7. Mount partitions before running the script:
+   sudo mount /dev/sdX2 /mnt          # Root partition (adjust number as needed)
+   sudo mkdir -p /mnt/boot/efi       # For UEFI only
+   sudo mount /dev/sdX1 /mnt/boot/efi
+   sudo swapon /dev/sdX3             # Swap (if any)
+
+8. Run the installation script afterwards.
+"""
 
 EOF
 

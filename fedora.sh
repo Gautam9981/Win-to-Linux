@@ -141,10 +141,10 @@ if [[ "$wipe_answer" == "yes" ]]; then
         swap_part=""
       fi
     else
-      efi_part="${disk}1"
+      efi_part="${disk}p1"
       root_part="${disk}2"
       if [ "$swap_size_mib" -gt 0 ]; then
-        swap_part="${disk}3"
+        swap_part="${disk}p3"
       else
         swap_part=""
       fi
@@ -160,9 +160,9 @@ if [[ "$wipe_answer" == "yes" ]]; then
     fi
 
     # Partition names for MBR are usually without p suffix
-    root_part="${disk}1"
+    root_part="${disk}p1"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}2"
+      swap_part="${disk}p2"
     else
       swap_part=""
     fi

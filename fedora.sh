@@ -232,9 +232,11 @@ fi
 
 # Mount special filesystems for chroot install environment
 echo "Mounting /dev, /proc, and /sys for installation environment..."
+sudo mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/run
 sudo mount --bind /dev /mnt/dev
 sudo mount --bind /proc /mnt/proc
 sudo mount --bind /sys /mnt/sys
+sudo mount --bind /run /mnt/run
 
 echo "Installing Fedora minimal system with $de_group..."
 dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group grub2-efi shim efibootmgr || \

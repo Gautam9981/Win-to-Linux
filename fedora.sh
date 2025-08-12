@@ -234,8 +234,8 @@ mount --bind /sys /mnt/sys
 
 
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
-dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 --use-host-config -y @core $de_group grub2
 
 
 echo "Installing bootloader..."

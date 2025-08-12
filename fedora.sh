@@ -237,7 +237,7 @@ dnf install --installroot=/mnt --releasever=42 --use-host-config -y @core $de_gr
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
   chroot /mnt grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=fedora --recheck
-  chroot /mnt grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+  chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
 else
   chroot /mnt grub2-install --target=i386-pc "$disk"
   chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg

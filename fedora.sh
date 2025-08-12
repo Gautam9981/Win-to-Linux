@@ -228,11 +228,11 @@ sudo mkdir -p /mnt/dev
 sudo mkdir -p /mnt/proc
 sudo mkdir -p /mnt/sys
 sudo mkdir -p /mnt/usr
-echo "Mounting /dev, /proc, and /sys for installation environment..."
-mount --bind /dev /mnt/dev
-mount --bind /proc /mnt/proc
-mount --bind /sys /mnt/sys
-mount --bind /usr /mnt/usr
+echo "Mounting /dev, /proc, /sys, and /usr for installation environment..."
+sudo mount --bind /dev /mnt/dev
+sudo mount --bind /proc /mnt/proc
+sudo mount --bind /sys /mnt/sys
+sudo mount --bind /usr /mnt/usr
 
 
 echo "Installing Fedora minimal system with $de_group..."

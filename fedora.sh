@@ -18,21 +18,21 @@ If you prefer to manually partition your drive instead of wiping and auto-partit
    - For Legacy BIOS (MBR): mklabel msdos
 5. Create partitions:
    For UEFI/GPT:
-     - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 1MiB 513MiB
+     - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 2048s 1050623s
        set 1 boot on
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 513MiB <root_end>
-     - Swap (linux-swap, optional): mkpart primary linux-swap <root_end> 100%
+     - Root (ext4, rest of disk minus swap): mkpart primary ext4 1050624s <root_end>
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
    For Legacy BIOS/MBR:
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 1MiB <root_end>
+     - Root (ext4, rest of disk minus swap): mkpart primary ext4 2048s <root_end>
        set 1 boot on
-     - Swap (linux-swap, optional): mkpart primary linux-swap <root_end> 100%
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
 6. Exit parted: quit
 7. Format partitions:
    - EFI (UEFI only): sudo mkfs.fat -F32 /dev/sdX1
-   - Root: sudo mkfs.ext4 /dev/sdX2
-   - Swap (if any): sudo mkswap /dev/sdX3 && sudo swapon /dev/sdX3
+   - Root: sudo mkfs.ext4 /dev/sdX2 (or /dev/sdX1 for Legacy BIOS)
+   - Swap (if any): sudo mkswap /dev/sdX3 (or /dev/sdX2 for Legacy BIOS) && sudo swapon /dev/sdX3 (or /dev/sdX2)
 8. Mount partitions before installation:
-   sudo mount /dev/sdX2 /mnt
+   sudo mount /dev/sdX2 /mnt (or /dev/sdX1 for Legacy BIOS)
    sudo mkdir -p /mnt/boot/efi
    sudo mount /dev/sdX1 /mnt/boot/efi  # UEFI only
 
@@ -79,8 +79,8 @@ if [[ "$wipe_answer" == "yes" ]]; then
     exit 1
   fi
 
-  read -p "Enter desired swap size in MiB (0 for no swap): " swap_size
-  if ! [[ "$swap_size" =~ ^[0-9]+$ ]]; then
+  read -p "Enter desired swap size in MiB (0 for no swap): " swap_size_mib
+  if ! [[ "$swap_size_mib" =~ ^[0-9]+$ ]]; then
     echo "Invalid swap size entered."
     exit 1
   fi
@@ -89,69 +89,68 @@ if [[ "$wipe_answer" == "yes" ]]; then
   wipefs -a "$disk"
   dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync
 
-  # Get disk size in bytes and convert to MiB
-  total_size_bytes=$(lsblk -b -dn -o SIZE "$disk")
-  total_size_mib=$((total_size_bytes / 1024 / 1024))
+  # Gather sector info
+  sector_size=$(cat /sys/block/$(basename $disk)/queue/hw_sector_size)
+  total_sectors=$(blockdev --getsz "$disk")
 
-  efi_size=512  # EFI partition size in MiB (for UEFI)
+  echo "Disk sector size: $sector_size bytes"
+  echo "Disk total sectors: $total_sectors"
 
-  # Calculate partition start/end positions
+  efi_size_mib=512
+  efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
+  swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
+
+  # Start sectors
+  # 2048 is a common first partition start (1MiB aligned)
+  efi_start=2048
+
   if [ "$fw_type" == "uefi" ]; then
-    root_start=$efi_size
+    efi_end=$((efi_start + efi_size_sectors - 1))
+    root_start=$((efi_end + 1))
   else
-    root_start=1
+    # Legacy BIOS - no EFI partition
+    root_start=2048
   fi
 
-  if [ "$swap_size" -gt 0 ]; then
-    root_end=$((total_size_mib - swap_size))
-    if [ "$root_end" -le $((root_start + 1)) ]; then
-      echo "ERROR: Swap size ($swap_size MiB) too large for disk size ($total_size_mib MiB)."
-      exit 1
-    fi
+  if [ "$swap_size_mib" -gt 0 ]; then
+    root_end=$((total_sectors - swap_size_sectors - 1))
+    swap_start=$((root_end + 1))
+    swap_end=$((total_sectors - 1))
   else
-    root_end=$total_size_mib
-  fi
-
-  swap_start=$((root_end + 1))
-  swap_end=$total_size_mib
-
-  echo "Disk size (MiB): $total_size_mib"
-  if [ "$fw_type" == "uefi" ]; then
-    echo "EFI partition: 1MiB - ${efi_size}MiB"
-  fi
-  echo "Root partition: ${root_start}MiB - ${root_end}MiB"
-  if [ "$swap_size" -gt 0 ]; then
-    echo "Swap partition: ${swap_start}MiB - ${swap_end}MiB"
+    root_end=$((total_sectors - 1))
+    swap_start=0
+    swap_end=0
   fi
 
   if [ "$fw_type" == "uefi" ]; then
     echo "Creating GPT partition table and partitions for UEFI boot..."
     parted --script "$disk" mklabel gpt
-    parted --script "$disk" mkpart ESP fat32 1MiB ${efi_size}MiB
+    parted --script "$disk" mkpart ESP fat32 "${efi_start}s" "${efi_end}s"
     parted --script "$disk" set 1 boot on
-    parted --script "$disk" mkpart primary ext4 ${efi_size}MiB ${root_end}MiB
-    if [ "$swap_size" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap ${swap_start}MiB ${swap_end}MiB
+    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
+    if [ "$swap_size_mib" -gt 0 ]; then
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
     fi
 
     efi_part="${disk}1"
     root_part="${disk}2"
-    if [ "$swap_size" -gt 0 ]; then
+    if [ "$swap_size_mib" -gt 0 ]; then
       swap_part="${disk}3"
     else
       swap_part=""
     fi
+
   else
     echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
     parted --script "$disk" mklabel msdos
-    parted --script "$disk" mkpart primary ext4 ${root_start}MiB ${root_end}MiB
+    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     parted --script "$disk" set 1 boot on
-    if [ "$swap_size" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap ${swap_start}MiB ${swap_end}MiB
+    if [ "$swap_size_mib" -gt 0 ]; then
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
     fi
 
     root_part="${disk}1"
-    if [ "$swap_size" -gt 0 ]; then
+    if [ "$swap_size_mib" -gt 0 ]; then
       swap_part="${disk}2"
     else
       swap_part=""
@@ -177,7 +176,7 @@ if [[ "$wipe_answer" == "yes" ]]; then
   fi
 
 else
-  echo "You chose to NOT wipe or auto-partition. Please specify your existing partitions."
+  echo "You chose NOT to wipe or auto-partition. Please specify your existing partitions."
 
   if [ "$fw_type" == "uefi" ]; then
     read -p "Enter EFI system partition (e.g. /dev/sda1): " efi_part
@@ -225,7 +224,8 @@ else
 fi
 
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
@@ -273,4 +273,4 @@ umount /mnt/dev || true
 umount /mnt/proc || true
 umount /mnt/sys || true
 
-echo "Installation complete. You can now reboot and remove the installation media."
+echo "Installation complete. You can now reboot and log in as $newuser."

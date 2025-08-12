@@ -21,11 +21,11 @@ If you prefer to manually partition your drive instead of wiping and auto-partit
      - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 2048s 1050623s
        set 1 boot on
      - Root (ext4, rest of disk minus swap): mkpart primary ext4 1050624s <root_end>
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> <swap_end>
    For Legacy BIOS/MBR:
      - Root (ext4, rest of disk minus swap): mkpart primary ext4 2048s <root_end>
        set 1 boot on
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> <swap_end>
 6. Exit parted: quit
 7. Format partitions:
    - EFI (UEFI only): sudo mkfs.fat -F32 /dev/sdX1
@@ -100,8 +100,7 @@ if [[ "$wipe_answer" == "yes" ]]; then
   efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
   swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
 
-  # Start sectors
-  # 2048 is a common first partition start (1MiB aligned)
+  # Start sectors (1MiB aligned)
   efi_start=2048
 
   if [ "$fw_type" == "uefi" ]; then
@@ -129,15 +128,26 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" set 1 boot on
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
     fi
 
-    efi_part="${disk}p1"
-    root_part="${disk}p2"
-    if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p3"
+    # Partition names for GPT with p suffix if disk name ends with a digit (like /dev/nvme0n1p1)
+    if [[ "$disk" =~ [0-9]$ ]]; then
+      efi_part="${disk}p1"
+      root_part="${disk}p2"
+      if [ "$swap_size_mib" -gt 0 ]; then
+        swap_part="${disk}p3"
+      else
+        swap_part=""
+      fi
     else
-      swap_part=""
+      efi_part="${disk}1"
+      root_part="${disk}2"
+      if [ "$swap_size_mib" -gt 0 ]; then
+        swap_part="${disk}3"
+      else
+        swap_part=""
+      fi
     fi
 
   else
@@ -146,12 +156,13 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     parted --script "$disk" set 1 boot on
     if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
     fi
 
-    root_part="${disk}p1"
+    # Partition names for MBR are usually without p suffix
+    root_part="${disk}1"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p2"
+      swap_part="${disk}2"
     else
       swap_part=""
     fi
@@ -223,64 +234,27 @@ else
   fi
 fi
 
-# Mount special filesystems for chroot install environment
-sudo mkdir -p /mnt/dev
-sudo mkdir -p /mnt/proc
-sudo mkdir -p /mnt/sys
-sudo mkdir -p /mnt/usr
-echo "Mounting /dev, /proc, /sys, and /usr for installation environment..."
-sudo mount --bind /dev /mnt/dev
-sudo mount --bind /proc /mnt/proc
-sudo mount --bind /sys /mnt/sys
-sudo mount --bind /usr /mnt/usr
-
-
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group grub2-efi shim efibootmgr || \
-dnf install --installroot=/mnt --releasever=42 --use-host-config -y @core $de_group grub2
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
 
+# Mount special filesystems for chroot environment
+echo "Mounting /dev, /proc, and /sys for installation environment..."
+mount --bind /dev /mnt/dev
+mount --bind /proc /mnt/proc
+mount --bind /sys /mnt/sys
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
   chroot /mnt grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=fedora --recheck
-  chroot /mnt grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+  chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
 else
   chroot /mnt grub2-install --target=i386-pc "$disk"
-  chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
+  chroot /mnt grub2-mkconfig -o /boot/grub/grub.cfg
 fi
 
-echo "Generating fstab..."
-genfstab -U /mnt >> /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
+echo "Unmounting special filesystems..."
+umount /mnt/dev /mnt/proc /mnt/sys
 
-# --- Create user and lock root ---
-read -p "Enter username for the new user: " newuser
-while true; do
-  read -s -p "Enter password for $newuser: " userpass
-  echo
-  read -s -p "Confirm password for $newuser: " userpass2
-  echo
-  [ "$userpass" = "$userpass2" ] && break
-  echo "Passwords do not match, please try again."
-done
+echo "Installation complete. You can reboot now."
 
-echo "Creating user $newuser with sudo privileges..."
-chroot /mnt /usr/sbin/useradd -m -G wheel -s /bin/bash "$newuser"
-echo "$newuser:$userpass" | chroot /mnt /usr/sbin/chpasswd
-
-echo "Enabling sudo for wheel group..."
-chroot /mnt /usr/bin/sed -i '/^# %wheel ALL=(ALL) ALL/s/^# //' /mnt/etc/sudoers || true
-
-echo "Set root password (will be locked afterward):"
-chroot /mnt /usr/bin/passwd root
-
-echo "Locking root account for security..."
-chroot /mnt /usr/sbin/usermod -L root
-chroot /mnt /usr/bin/passwd -l root
-
-# --- Cleanup ---
-umount /mnt/dev || true
-umount /mnt/proc || true
-umount /mnt/sys || true
-umount /mnt/usr || true
-
-echo "Installation complete. You can now reboot and log in as $newuser."

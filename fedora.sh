@@ -3,6 +3,12 @@ set -e
 
 echo "== Fedora Full Disk Wipe + Install =="
 
+# Check if sgdisk exists, install gdisk if not
+if ! command -v sgdisk &> /dev/null; then
+  echo "sgdisk not found, installing gdisk package..."
+  sudo dnf install -y gdisk || { echo "Failed to install gdisk"; exit 1; }
+fi
+
 # --- Prompt inputs ---
 read -p "Enter target disk to wipe and install on (e.g. /dev/sda): " disk
 
@@ -41,23 +47,22 @@ esac
 
 # --- Wipe disk ---
 echo "Wiping partition table on $disk..."
-cgdisk --zap-all $disk
-wipefs -a $disk
-dd if=/dev/zero of=$disk bs=1M count=10 conv=fdatasync
+sgdisk --zap-all "$disk"
+wipefs -a "$disk"
+dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync status=progress
 
 # --- Partition sizes in MiB ---
 efi_size=512      # EFI partition size (if UEFI)
 swap_size=4096    # Swap size 4GiB
-root_size=0       # Will use remaining disk space
 
 # --- Create partitions ---
 if [ "$fw_type" == "uefi" ]; then
   echo "Creating GPT partition table and partitions for UEFI boot..."
-  parted --script $disk mklabel gpt
-  parted --script $disk mkpart ESP fat32 1MiB ${efi_size}MiB
-  parted --script $disk set 1 boot on
-  parted --script $disk mkpart primary ext4 ${efi_size}MiB $((efi_size + swap_size))MiB
-  parted --script $disk mkpart primary linux-swap $((efi_size + swap_size))MiB 100%
+  parted --script "$disk" mklabel gpt
+  parted --script "$disk" mkpart ESP fat32 1MiB ${efi_size}MiB
+  parted --script "$disk" set 1 boot on
+  parted --script "$disk" mkpart primary ext4 ${efi_size}MiB $((efi_size + swap_size))MiB
+  parted --script "$disk" mkpart primary linux-swap $((efi_size + swap_size))MiB 100%
 
   efi_part="${disk}1"
   root_part="${disk}2"
@@ -65,10 +70,10 @@ if [ "$fw_type" == "uefi" ]; then
 
 elif [ "$fw_type" == "legacybios" ]; then
   echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
-  parted --script $disk mklabel msdos
-  parted --script $disk mkpart primary ext4 1MiB $((swap_size))MiB
-  parted --script $disk set 1 boot on
-  parted --script $disk mkpart primary linux-swap $((swap_size))MiB 100%
+  parted --script "$disk" mklabel msdos
+  parted --script "$disk" mkpart primary ext4 1MiB $((swap_size))MiB
+  parted --script "$disk" set 1 boot on
+  parted --script "$disk" mkpart primary linux-swap $((swap_size))MiB 100%
 
   root_part="${disk}1"
   swap_part="${disk}2"
@@ -76,17 +81,17 @@ fi
 
 echo "Formatting partitions..."
 if [ "$fw_type" == "uefi" ]; then
-  mkfs.fat -F32 $efi_part
+  mkfs.fat -F32 "$efi_part"
 fi
-mkfs.ext4 $root_part
-mkswap $swap_part
-swapon $swap_part
+mkfs.ext4 "$root_part"
+mkswap "$swap_part"
+swapon "$swap_part"
 
 echo "Mounting partitions..."
-mount $root_part /mnt
+mount "$root_part" /mnt
 if [ "$fw_type" == "uefi" ]; then
   mkdir -p /mnt/boot/efi
-  mount $efi_part /mnt/boot/efi
+  mount "$efi_part" /mnt/boot/efi
 fi
 
 # --- Install Fedora minimal + Desktop Environment ---
@@ -98,15 +103,15 @@ dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False 
 
 # --- Generate fstab ---
 echo "Generating fstab..."
-genfstab -U /mnt >> /mnt/etc/fstab || {
+genfstab -U /mnt > /mnt/etc/fstab || {
   echo "ERROR: fstab generation failed."
   exit 1
 }
 
 # --- Prepare chroot environment ---
-mount --bind /dev /mnt/dev
-mount --bind /proc /mnt/proc
-mount --bind /sys /mnt/sys
+mount --rbind /dev /mnt/dev
+mount --rbind /proc /mnt/proc
+mount --rbind /sys /mnt/sys
 
 # --- Create user and lock root ---
 read -p "Enter username for the new user: " newuser
@@ -124,18 +129,15 @@ chroot /mnt /usr/sbin/useradd -m -G wheel -s /bin/bash "$newuser"
 echo "$newuser:$userpass" | chroot /mnt /usr/sbin/chpasswd
 
 echo "Enabling sudo for wheel group..."
-chroot /mnt /usr/bin/sed -i '/^# %wheel ALL=(ALL) ALL/s/^# //' /mnt/etc/sudoers || true
-
-echo "Set root password (will be locked afterward):"
-chroot /mnt /usr/bin/passwd root
+chroot /mnt /usr/bin/sed -i 's/^# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /mnt/etc/sudoers || true
 
 echo "Locking root account for security..."
 chroot /mnt /usr/sbin/usermod -L root
 chroot /mnt /usr/bin/passwd -l root
 
 # --- Cleanup ---
-umount /mnt/dev
-umount /mnt/proc
-umount /mnt/sys
+umount -l /mnt/dev
+umount -l /mnt/proc
+umount -l /mnt/sys
 
 echo "Installation complete. You can now reboot and log in as $newuser."

@@ -285,5 +285,6 @@ chroot /mnt /usr/bin/passwd -l root
 umount /mnt/dev || true
 umount /mnt/proc || true
 umount /mnt/sys || true
+umount /mnt/usr || true
 
 echo "Installation complete. You can now reboot and log in as $newuser."

@@ -223,15 +223,17 @@ else
   fi
 fi
 
-echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
-dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
-
 # Mount special filesystems for chroot install environment
 echo "Mounting /dev, /proc, and /sys for installation environment..."
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc
 mount --bind /sys /mnt/sys
+
+
+echo "Installing Fedora minimal system with $de_group..."
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
+
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then

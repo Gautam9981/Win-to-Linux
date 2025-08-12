@@ -41,7 +41,7 @@ esac
 
 # --- Wipe disk ---
 echo "Wiping partition table on $disk..."
-sgdisk --zap-all $disk
+cgdisk --zap-all $disk
 wipefs -a $disk
 dd if=/dev/zero of=$disk bs=1M count=10 conv=fdatasync
 

@@ -1,12 +1,31 @@
 #!/bin/bash
 set -e
 
-echo "== Fedora Manual Installer Prep + Install =="
+echo "== Fedora Full Disk Wipe + Install =="
 
 # --- Prompt inputs ---
-read -p "Enter target disk (e.g. /dev/sda): " disk
-read -p "Enter partition to shrink (e.g. /dev/sda3): " shrink_part
-read -p "Enter space to shrink in GiB (e.g. 20): " shrink_gib
+read -p "Enter target disk to wipe and install on (e.g. /dev/sda): " disk
+
+if [ ! -b "$disk" ]; then
+  echo "ERROR: Disk $disk not found!"
+  exit 1
+fi
+
+echo "IMPORTANT: This will ERASE ALL DATA on $disk."
+read -p "Type YES to confirm disk wipe and continue: " confirm
+if [[ "$confirm" != "YES" ]]; then
+  echo "Aborted by user."
+  exit 1
+fi
+
+echo "Enter firmware type (UEFI or LegacyBIOS):"
+read -p "(UEFI/LegacyBIOS): " fw_type
+fw_type=$(echo "$fw_type" | tr '[:upper:]' '[:lower:]')
+
+if [[ "$fw_type" != "uefi" && "$fw_type" != "legacybios" ]]; then
+  echo "Invalid firmware type. Please enter UEFI or LegacyBIOS."
+  exit 1
+fi
 
 echo "Choose Desktop Environment:"
 echo "1) GNOME (default)"
@@ -20,98 +39,60 @@ case $de_choice in
   *) de_group="@gnome-desktop";;
 esac
 
-# --- Check disk and partition ---
-if [ ! -b "$disk" ]; then
-  echo "ERROR: Disk $disk not found!"
-  exit 1
+# --- Wipe disk ---
+echo "Wiping partition table on $disk..."
+sgdisk --zap-all $disk
+wipefs -a $disk
+dd if=/dev/zero of=$disk bs=1M count=10 conv=fdatasync
+
+# --- Partition sizes in MiB ---
+efi_size=512      # EFI partition size (if UEFI)
+swap_size=4096    # Swap size 4GiB
+root_size=0       # Will use remaining disk space
+
+# --- Create partitions ---
+if [ "$fw_type" == "uefi" ]; then
+  echo "Creating GPT partition table and partitions for UEFI boot..."
+  parted --script $disk mklabel gpt
+  parted --script $disk mkpart ESP fat32 1MiB ${efi_size}MiB
+  parted --script $disk set 1 boot on
+  parted --script $disk mkpart primary ext4 ${efi_size}MiB $((efi_size + swap_size))MiB
+  parted --script $disk mkpart primary linux-swap $((efi_size + swap_size))MiB 100%
+
+  efi_part="${disk}1"
+  root_part="${disk}2"
+  swap_part="${disk}3"
+
+elif [ "$fw_type" == "legacybios" ]; then
+  echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
+  parted --script $disk mklabel msdos
+  parted --script $disk mkpart primary ext4 1MiB $((swap_size))MiB
+  parted --script $disk set 1 boot on
+  parted --script $disk mkpart primary linux-swap $((swap_size))MiB 100%
+
+  root_part="${disk}1"
+  swap_part="${disk}2"
 fi
 
-if [ ! -b "$shrink_part" ]; then
-  echo "ERROR: Partition $shrink_part not found!"
-  exit 1
-fi
-
-# --- Detect partition style ---
-part_style=$(parted $disk print | grep 'Partition Table' | awk '{print $3}')
-echo "Detected partition style: $part_style"
-
-echo "IMPORTANT: THIS SCRIPT DOES NOT SHRINK FILESYSTEMS AUTOMATICALLY."
-echo "You must shrink the filesystem on $shrink_part before continuing."
-echo "For example, use 'resize2fs' for ext4, or KDE Partition Manager / gparted live environment."
-read -p "Have you safely shrunk your filesystem on $shrink_part? (yes/no): " confirm
-if [[ "$confirm" != "yes" ]]; then
-  echo "Please shrink the filesystem first. Aborting."
-  exit 1
-fi
-
-# --- Calculate sizes in MiB ---
-shrink_mib=$((shrink_gib * 1024))
-
-# --- Find free space start ---
-free_start=$(parted $disk unit MiB print free | grep "Free Space" | head -1 | awk '{print $2}' | sed 's/MiB//')
-if [ -z "$free_start" ]; then
-  echo "ERROR: Could not find free space on $disk. Make sure you have shrunk a partition and there is free space."
-  exit 1
-fi
-echo "Free space starts at ${free_start}MiB"
-
-if [ "$part_style" == "gpt" ]; then
-  efi_size=500
-  swap_size=4096
-  root_size=$((shrink_mib - efi_size - swap_size))
-
-  echo "Creating EFI (500 MiB), root, and swap partitions..."
-
-  parted --script $disk mkpart primary fat32 ${free_start}MiB $((free_start + efi_size))MiB
-  efi_part="${disk}$(parted $disk print | grep -E '^ [0-9]+' | tail -3 | head -1 | awk '{print $1}')"
-  parted --script $disk set $efi_part boot on
-
-  parted --script $disk mkpart primary ext4 $((free_start + efi_size))MiB $((free_start + efi_size + root_size))MiB
-  root_part="${disk}$(parted $disk print | grep -E '^ [0-9]+' | tail -2 | head -1 | awk '{print $1}')"
-
-  parted --script $disk mkpart primary linux-swap $((free_start + efi_size + root_size))MiB $((free_start + efi_size + root_size + swap_size))MiB
-  swap_part="${disk}$(parted $disk print | grep -E '^ [0-9]+' | tail -1 | awk '{print $1}')"
-
-  echo "Formatting partitions..."
+echo "Formatting partitions..."
+if [ "$fw_type" == "uefi" ]; then
   mkfs.fat -F32 $efi_part
-  mkfs.ext4 $root_part
-  mkswap $swap_part
-  swapon $swap_part
+fi
+mkfs.ext4 $root_part
+mkswap $swap_part
+swapon $swap_part
 
-  echo "Mounting root at /mnt and EFI at /mnt/boot/efi"
-  mount $root_part /mnt
+echo "Mounting partitions..."
+mount $root_part /mnt
+if [ "$fw_type" == "uefi" ]; then
   mkdir -p /mnt/boot/efi
   mount $efi_part /mnt/boot/efi
-
-elif [ "$part_style" == "msdos" ]; then
-  swap_size=4096
-  root_size=$((shrink_mib - swap_size))
-
-  echo "MBR detected. Creating root and swap partitions (no EFI)."
-
-  parted --script $disk mkpart primary ext4 ${free_start}MiB $((free_start + root_size))MiB
-  root_part="${disk}$(parted $disk print | grep -E '^ [0-9]+' | tail -2 | head -1 | awk '{print $1}')"
-
-  parted --script $disk mkpart primary linux-swap $((free_start + root_size))MiB $((free_start + root_size + swap_size))MiB
-  swap_part="${disk}$(parted $disk print | grep -E '^ [0-9]+' | tail -1 | awk '{print $1}')"
-
-  echo "Formatting partitions..."
-  mkfs.ext4 $root_part
-  mkswap $swap_part
-  swapon $swap_part
-
-  echo "Mounting root at /mnt"
-  mount $root_part /mnt
-
-else
-  echo "Unsupported partition table type: $part_style"
-  exit 1
 fi
 
 # --- Install Fedora minimal + Desktop Environment ---
 echo "Installing Fedora minimal system with $de_group..."
 dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group || {
-  echo "ERROR: Package installation failed. Check your network connection and package repos."
+  echo "ERROR: Package installation failed. Check your network connection and repos."
   exit 1
 }
 

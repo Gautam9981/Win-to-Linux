@@ -252,10 +252,6 @@ fi
 echo "Generating fstab..."
 genfstab -U /mnt >> /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
 
-mount --bind /dev /mnt/dev
-mount --bind /proc /mnt/proc
-mount --bind /sys /mnt/sys
-
 # --- Create user and lock root ---
 read -p "Enter username for the new user: " newuser
 while true; do

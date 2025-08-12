@@ -132,10 +132,10 @@ if [[ "$wipe_answer" == "yes" ]]; then
       parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
     fi
 
-    efi_part="${disk}1"
-    root_part="${disk}2"
+    efi_part="${disk}p1"
+    root_part="${disk}p2"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}3"
+      swap_part="${disk}p3"
     else
       swap_part=""
     fi
@@ -149,9 +149,9 @@ if [[ "$wipe_answer" == "yes" ]]; then
       parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
     fi
 
-    root_part="${disk}1"
+    root_part="${disk}p1"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}2"
+      swap_part="${disk}p2"
     else
       swap_part=""
     fi

@@ -100,9 +100,9 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script $disk mkpart primary ext4 ${efi_size}MiB $((efi_size + swap_size))MiB
     parted --script $disk mkpart primary linux-swap $((efi_size + swap_size))MiB 100%
 
-    efi_part="${disk}1"
-    root_part="${disk}2"
-    swap_part="${disk}3"
+    efi_part="${disk}p1"
+    root_part="${disk}p2"
+    swap_part="${disk}p3"
 
   elif [ "$fw_type" == "legacybios" ]; then
     echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
@@ -111,8 +111,8 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script $disk set 1 boot on
     parted --script $disk mkpart primary linux-swap $((swap_size))MiB 100%
 
-    root_part="${disk}1"
-    swap_part="${disk}2"
+    root_part="${disk}p1"
+    swap_part="${disk}p2"
   fi
 
   echo "Formatting partitions..."

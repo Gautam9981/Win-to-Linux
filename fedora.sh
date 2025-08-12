@@ -1,55 +1,48 @@
  #!/bin/bash
 set -e
 
-echo "== Fedora Install (Full disk or partitioning) =="
+echo "== Fedora Full Disk Wipe + Install =="
 
 cat <<'EOF'
 
-Simplified Manual Partitioning Instructions
+--- Manual Partitioning Instructions ---
 
-If you want to manually partition your drive, here’s a quick guide:
+If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, follow these steps carefully:
 
 1. Boot Fedora Live environment (e.g., Fedora KDE Spin).
-
-2. Open a terminal and identify your disk:
-   lsblk
-
-3. Use a graphical partition tool (recommended for ease):
-   - Open GParted or KDE Partition Manager from the live session menu.
-   - Select your target disk.
-
-4. Create a new partition table:
-   - For UEFI systems: choose GPT.
-   - For Legacy BIOS systems: choose MSDOS.
-
+2. Open a terminal and identify your disk with: lsblk
+3. Start parted on your disk (replace /dev/sdX accordingly):
+   sudo parted /dev/sdX
+4. Create a partition table:
+   - For UEFI systems (GPT): mklabel gpt
+   - For Legacy BIOS (MBR): mklabel msdos
 5. Create partitions:
+   For UEFI/GPT:
+     - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 2048s 1050623s
+       set 1 boot on
+     - Root (ext4, rest of disk minus swap): mkpart primary ext4 1050624s <root_end>
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
+   For Legacy BIOS/MBR:
+     - Root (ext4, rest of disk minus swap): mkpart primary ext4 2048s <root_end>
+       set 1 boot on
+     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
+6. Exit parted: quit
+7. Format partitions:
+   - EFI (UEFI only): sudo mkfs.fat -F32 /dev/sdX1
+   - Root: sudo mkfs.ext4 /dev/sdX2 (or /dev/sdX1 for Legacy BIOS)
+   - Swap (if any): sudo mkswap /dev/sdX3 (or /dev/sdX2 for Legacy BIOS) && sudo swapon /dev/sdX3 (or /dev/sdX2)
+8. Mount partitions before installation:
+   sudo mount /dev/sdX2 /mnt (or /dev/sdX1 for Legacy BIOS)
+   sudo mkdir -p /mnt/boot/efi
+   sudo mount /dev/sdX1 /mnt/boot/efi  # UEFI only
 
-   - UEFI/GPT:
-     - EFI System Partition: 512 MiB, FAT32, set boot flag.
-     - Root Partition: ext4, use remaining space minus swap.
-     - Swap Partition (optional): size as desired.
+Proceed with the installation script after this setup.
 
-   - Legacy BIOS/MSDOS:
-     - Root Partition: ext4, most of the disk, set boot flag.
-     - Swap Partition (optional): size as desired.
-
-6. Format partitions:
-   - EFI (UEFI only): FAT32
-   - Root: ext4
-   - Swap: linux-swap
-
-7. Mount partitions before running the script:
-   sudo mount /dev/sdX2 /mnt          # Root partition (adjust number as needed)
-   sudo mkdir -p /mnt/boot/efi       # For UEFI only
-   sudo mount /dev/sdX1 /mnt/boot/efi
-   sudo swapon /dev/sdX3             # Swap (if any)
-
-8. Run the installation script afterwards.
-"""
+---
 
 EOF
 
-read -p "Enter target disk to install on (e.g. /dev/sda or /dev/nvme0n1): " disk
+read -p "Enter target disk to install on (e.g. /dev/sda): " disk
 if [ ! -b "$disk" ]; then
   echo "ERROR: Disk $disk not found!"
   exit 1
@@ -58,7 +51,8 @@ fi
 read -p "Do you want to wipe and auto-partition the disk? (yes/no): " wipe_answer
 wipe_answer=$(echo "$wipe_answer" | tr '[:upper:]' '[:lower:]')
 
-read -p "Enter firmware type (UEFI or LegacyBIOS): " fw_type
+echo "Enter firmware type (UEFI or LegacyBIOS):"
+read -p "(UEFI/LegacyBIOS): " fw_type
 fw_type=$(echo "$fw_type" | tr '[:upper:]' '[:lower:]')
 if [[ "$fw_type" != "uefi" && "$fw_type" != "legacybios" ]]; then
   echo "Invalid firmware type. Please enter UEFI or LegacyBIOS."
@@ -77,20 +71,8 @@ case $de_choice in
   *) de_group="@gnome-desktop";;
 esac
 
-# Function to get partition suffix based on device type
-get_part_suffix() {
-  # NVMe devices end with 'p' before partition number, others don't
-  if [[ "$disk" =~ nvme ]]; then
-    echo "p"
-  else
-    echo ""
-  fi
-}
-
-part_suffix=$(get_part_suffix)
-
 if [[ "$wipe_answer" == "yes" ]]; then
-  echo "WARNING: This will ERASE ALL DATA on $disk."
+  echo "IMPORTANT: This will ERASE ALL DATA on $disk."
   read -p "Type YES to confirm disk wipe and continue: " confirm
   if [[ "$confirm" != "YES" ]]; then
     echo "Aborted by user."
@@ -107,6 +89,7 @@ if [[ "$wipe_answer" == "yes" ]]; then
   wipefs -a "$disk"
   dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync
 
+  # Gather sector info
   sector_size=$(cat /sys/block/$(basename $disk)/queue/hw_sector_size)
   total_sectors=$(blockdev --getsz "$disk")
 
@@ -117,12 +100,15 @@ if [[ "$wipe_answer" == "yes" ]]; then
   efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
   swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
 
+  # Start sectors
+  # 2048 is a common first partition start (1MiB aligned)
   efi_start=2048
 
   if [ "$fw_type" == "uefi" ]; then
     efi_end=$((efi_start + efi_size_sectors - 1))
     root_start=$((efi_end + 1))
   else
+    # Legacy BIOS - no EFI partition
     root_start=2048
   fi
 
@@ -143,14 +129,13 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" set 1 boot on
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     if [ "$swap_size_mib" -gt 0 ]; then
-      # Use '100%' instead of '-1s' for the last sector to avoid error
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" 100%
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
     fi
 
-    efi_part="${disk}${part_suffix}1"
-    root_part="${disk}${part_suffix}2"
+    efi_part="${disk}p1"
+    root_part="${disk}p2"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}${part_suffix}3"
+      swap_part="${disk}p3"
     else
       swap_part=""
     fi
@@ -161,12 +146,12 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     parted --script "$disk" set 1 boot on
     if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" 100%
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
     fi
 
-    root_part="${disk}${part_suffix}1"
+    root_part="${disk}p1"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}${part_suffix}2"
+      swap_part="${disk}p2"
     else
       swap_part=""
     fi
@@ -194,14 +179,15 @@ else
   echo "You chose NOT to wipe or auto-partition. Please specify your existing partitions."
 
   if [ "$fw_type" == "uefi" ]; then
-    read -p "Enter EFI system partition (e.g. /dev/sda1 or /dev/nvme0n1p1): " efi_part
+    read -p "Enter EFI system partition (e.g. /dev/sda1): " efi_part
   else
     efi_part=""
   fi
 
-  read -p "Enter root partition (e.g. /dev/sda2 or /dev/nvme0n1p2): " root_part
-  read -p "Enter swap partition (e.g. /dev/sda3 or /dev/nvme0n1p3) or leave blank if none: " swap_part
+  read -p "Enter root partition (e.g. /dev/sda2): " root_part
+  read -p "Enter swap partition (e.g. /dev/sda3) or leave blank if none: " swap_part
 
+  # Validate partitions exist
   for part in $efi_part $root_part $swap_part; do
     if [ -n "$part" ] && [ ! -b "$part" ]; then
       echo "ERROR: Partition $part not found!"
@@ -237,16 +223,20 @@ else
   fi
 fi
 
+#Mounting special directories
 echo "Mounting necessary chroot directories..."
-sudo mkdir -p /mnt/{sys,dev,proc,run}
+sudo mkdir -p /mnt/sys /mnt/dev /mnt/run /mnt/proc /mnt/usr
 sudo mount --bind /sys /mnt/sys
 sudo mount --bind /dev /mnt/dev
 sudo mount --bind /proc /mnt/proc
 sudo mount --bind /run /mnt/run
+sudo mount --bind /usr /mnt/usr
 
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group grub2-efi shim efibootmgr sudo vim firefox || \
-dnf install --installroot=/mnt --releasever=42 --use-host-config -y @core $de_group grub2
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
+
+
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
@@ -258,9 +248,11 @@ else
 fi
 
 echo "Generating fstab..."
-genfstab -U /mnt > /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
+genfstab -U /mnt >> /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
 
-# Create user and lock root
+
+
+# --- Create user and lock root ---
 read -p "Enter username for the new user: " newuser
 while true; do
   read -s -p "Enter password for $newuser: " userpass
@@ -285,7 +277,9 @@ echo "Locking root account for security..."
 chroot /mnt /usr/sbin/usermod -L root
 chroot /mnt /usr/bin/passwd -l root
 
-# Cleanup
-umount -R /mnt || true
+# --- Cleanup ---
+umount /mnt/dev || true
+umount /mnt/proc || true
+umount /mnt/sys || true
 
 echo "Installation complete. You can now reboot and log in as $newuser."

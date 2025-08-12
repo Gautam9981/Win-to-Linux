@@ -89,11 +89,13 @@ if [[ "$wipe_answer" == "yes" ]]; then
   wipefs -a "$disk"
   dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync
 
-  total_size_bytes=$(blockdev --getsize64 "$disk")
+  # Get disk size in bytes and convert to MiB
+  total_size_bytes=$(lsblk -b -dn -o SIZE "$disk")
   total_size_mib=$((total_size_bytes / 1024 / 1024))
 
   efi_size=512  # EFI partition size in MiB (for UEFI)
 
+  # Calculate partition start/end positions
   if [ "$fw_type" == "uefi" ]; then
     root_start=$efi_size
   else
@@ -101,10 +103,25 @@ if [[ "$wipe_answer" == "yes" ]]; then
   fi
 
   if [ "$swap_size" -gt 0 ]; then
-    # root_end = total_size - swap_size
     root_end=$((total_size_mib - swap_size))
+    if [ "$root_end" -le $((root_start + 1)) ]; then
+      echo "ERROR: Swap size ($swap_size MiB) too large for disk size ($total_size_mib MiB)."
+      exit 1
+    fi
   else
     root_end=$total_size_mib
+  fi
+
+  swap_start=$((root_end + 1))
+  swap_end=$total_size_mib
+
+  echo "Disk size (MiB): $total_size_mib"
+  if [ "$fw_type" == "uefi" ]; then
+    echo "EFI partition: 1MiB - ${efi_size}MiB"
+  fi
+  echo "Root partition: ${root_start}MiB - ${root_end}MiB"
+  if [ "$swap_size" -gt 0 ]; then
+    echo "Swap partition: ${swap_start}MiB - ${swap_end}MiB"
   fi
 
   if [ "$fw_type" == "uefi" ]; then
@@ -114,7 +131,7 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" set 1 boot on
     parted --script "$disk" mkpart primary ext4 ${efi_size}MiB ${root_end}MiB
     if [ "$swap_size" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap ${root_end}MiB 100%
+      parted --script "$disk" mkpart primary linux-swap ${swap_start}MiB ${swap_end}MiB
     fi
 
     efi_part="${disk}1"
@@ -127,10 +144,10 @@ if [[ "$wipe_answer" == "yes" ]]; then
   else
     echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
     parted --script "$disk" mklabel msdos
-    parted --script "$disk" mkpart primary ext4 1MiB ${root_end}MiB
+    parted --script "$disk" mkpart primary ext4 ${root_start}MiB ${root_end}MiB
     parted --script "$disk" set 1 boot on
     if [ "$swap_size" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap ${root_end}MiB 100%
+      parted --script "$disk" mkpart primary linux-swap ${swap_start}MiB ${swap_end}MiB
     fi
 
     root_part="${disk}1"
@@ -256,4 +273,4 @@ umount /mnt/dev || true
 umount /mnt/proc || true
 umount /mnt/sys || true
 
-echo "Installation complete. You can now reboot and log in as $newuser."
+echo "Installation complete. You can now reboot and remove the installation media."

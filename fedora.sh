@@ -180,7 +180,7 @@ fi
 
 # --- Install Fedora minimal + Desktop Environment ---
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group || {
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group || {
   echo "ERROR: Package installation failed. Check your network connection and repos."
   exit 1
 }

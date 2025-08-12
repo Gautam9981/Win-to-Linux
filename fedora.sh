@@ -224,6 +224,9 @@ else
 fi
 
 # Mount special filesystems for chroot install environment
+sudo mkdir -p /mnt/dev
+sudo mkdir -p /mnt/proc
+sudo mkdir -p /mnt/sys
 echo "Mounting /dev, /proc, and /sys for installation environment..."
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc

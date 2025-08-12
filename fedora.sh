@@ -49,7 +49,7 @@ If you want to manually partition your drive, here’s a quick guide:
 
 EOF
 
-read -p "Enter target disk to install on (e.g. /dev/sda): " disk
+read -p "Enter target disk to install on (e.g. /dev/sda or /dev/nvme0n1): " disk
 if [ ! -b "$disk" ]; then
   echo "ERROR: Disk $disk not found!"
   exit 1
@@ -58,8 +58,7 @@ fi
 read -p "Do you want to wipe and auto-partition the disk? (yes/no): " wipe_answer
 wipe_answer=$(echo "$wipe_answer" | tr '[:upper:]' '[:lower:]')
 
-echo "Enter firmware type (UEFI or LegacyBIOS):"
-read -p "(UEFI/LegacyBIOS): " fw_type
+read -p "Enter firmware type (UEFI or LegacyBIOS): " fw_type
 fw_type=$(echo "$fw_type" | tr '[:upper:]' '[:lower:]')
 if [[ "$fw_type" != "uefi" && "$fw_type" != "legacybios" ]]; then
   echo "Invalid firmware type. Please enter UEFI or LegacyBIOS."
@@ -78,8 +77,20 @@ case $de_choice in
   *) de_group="@gnome-desktop";;
 esac
 
+# Function to get partition suffix based on device type
+get_part_suffix() {
+  # NVMe devices end with 'p' before partition number, others don't
+  if [[ "$disk" =~ nvme ]]; then
+    echo "p"
+  else
+    echo ""
+  fi
+}
+
+part_suffix=$(get_part_suffix)
+
 if [[ "$wipe_answer" == "yes" ]]; then
-  echo "IMPORTANT: This will ERASE ALL DATA on $disk."
+  echo "WARNING: This will ERASE ALL DATA on $disk."
   read -p "Type YES to confirm disk wipe and continue: " confirm
   if [[ "$confirm" != "YES" ]]; then
     echo "Aborted by user."
@@ -96,7 +107,6 @@ if [[ "$wipe_answer" == "yes" ]]; then
   wipefs -a "$disk"
   dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync
 
-  # Gather sector info
   sector_size=$(cat /sys/block/$(basename $disk)/queue/hw_sector_size)
   total_sectors=$(blockdev --getsz "$disk")
 
@@ -107,15 +117,12 @@ if [[ "$wipe_answer" == "yes" ]]; then
   efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
   swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
 
-  # Start sectors
-  # 2048 is a common first partition start (1MiB aligned)
   efi_start=2048
 
   if [ "$fw_type" == "uefi" ]; then
     efi_end=$((efi_start + efi_size_sectors - 1))
     root_start=$((efi_end + 1))
   else
-    # Legacy BIOS - no EFI partition
     root_start=2048
   fi
 
@@ -136,13 +143,14 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" set 1 boot on
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
+      # Use '100%' instead of '-1s' for the last sector to avoid error
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" 100%
     fi
 
-    efi_part="${disk}p1"
-    root_part="${disk}p2"
+    efi_part="${disk}${part_suffix}1"
+    root_part="${disk}${part_suffix}2"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p3"
+      swap_part="${disk}${part_suffix}3"
     else
       swap_part=""
     fi
@@ -153,12 +161,12 @@ if [[ "$wipe_answer" == "yes" ]]; then
     parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
     parted --script "$disk" set 1 boot on
     if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" 100%
     fi
 
-    root_part="${disk}p1"
+    root_part="${disk}${part_suffix}1"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p2"
+      swap_part="${disk}${part_suffix}2"
     else
       swap_part=""
     fi
@@ -186,15 +194,14 @@ else
   echo "You chose NOT to wipe or auto-partition. Please specify your existing partitions."
 
   if [ "$fw_type" == "uefi" ]; then
-    read -p "Enter EFI system partition (e.g. /dev/sda1): " efi_part
+    read -p "Enter EFI system partition (e.g. /dev/sda1 or /dev/nvme0n1p1): " efi_part
   else
     efi_part=""
   fi
 
-  read -p "Enter root partition (e.g. /dev/sda2): " root_part
-  read -p "Enter swap partition (e.g. /dev/sda3) or leave blank if none: " swap_part
+  read -p "Enter root partition (e.g. /dev/sda2 or /dev/nvme0n1p2): " root_part
+  read -p "Enter swap partition (e.g. /dev/sda3 or /dev/nvme0n1p3) or leave blank if none: " swap_part
 
-  # Validate partitions exist
   for part in $efi_part $root_part $swap_part; do
     if [ -n "$part" ] && [ ! -b "$part" ]; then
       echo "ERROR: Partition $part not found!"
@@ -230,32 +237,30 @@ else
   fi
 fi
 
-# Mount special filesystems for chroot install environment
-echo "Mounting /dev, /proc, and /sys for installation environment..."
-sudo mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/run
+echo "Mounting necessary chroot directories..."
+sudo mkdir -p /mnt/{sys,dev,proc,run}
+sudo mount --bind /sys /mnt/sys
 sudo mount --bind /dev /mnt/dev
 sudo mount --bind /proc /mnt/proc
-sudo mount --bind /sys /mnt/sys
 sudo mount --bind /run /mnt/run
 
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y @core $de_group grub2-efi shim efibootmgr || \
-dnf install --installroot=/mnt --releasever=42 --use-host-config -y @core $de_group grub2
-
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr sudo vim firefox || \
+dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
   chroot /mnt grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=fedora --recheck
-  chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
+  chroot /mnt grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
 else
   chroot /mnt grub2-install --target=i386-pc "$disk"
   chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
 fi
 
 echo "Generating fstab..."
-genfstab -U /mnt >> /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
+genfstab -U /mnt > /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
 
-# --- Create user and lock root ---
+# Create user and lock root
 read -p "Enter username for the new user: " newuser
 while true; do
   read -s -p "Enter password for $newuser: " userpass
@@ -280,9 +285,7 @@ echo "Locking root account for security..."
 chroot /mnt /usr/sbin/usermod -L root
 chroot /mnt /usr/bin/passwd -l root
 
-# --- Cleanup ---
-umount /mnt/dev || true
-umount /mnt/proc || true
-umount /mnt/sys || true
+# Cleanup
+umount -R /mnt || true
 
 echo "Installation complete. You can now reboot and log in as $newuser."

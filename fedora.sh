@@ -30,37 +30,46 @@ Once done, return to this script and enter the paths to these partitions when pr
 EOF
 
 
+# Prompt for disk
 read -p "Enter target disk to install on (e.g. /dev/sda): " disk
 if [ ! -b "$disk" ]; then
   echo "ERROR: Disk $disk not found!"
   exit 1
 fi
 
+# Wipe and auto partition?
 read -p "Do you want to wipe and auto-partition the disk? (yes/no): " wipe_answer
 wipe_answer=$(echo "$wipe_answer" | tr '[:upper:]' '[:lower:]')
 
-echo "Enter firmware type (UEFI or LegacyBIOS):"
-read -p "(UEFI/LegacyBIOS): " fw_type
+# Firmware type (UEFI or LegacyBIOS)
+read -p "Enter firmware type (UEFI or LegacyBIOS): " fw_type
 fw_type=$(echo "$fw_type" | tr '[:upper:]' '[:lower:]')
 if [[ "$fw_type" != "uefi" && "$fw_type" != "legacybios" ]]; then
   echo "Invalid firmware type. Please enter UEFI or LegacyBIOS."
   exit 1
 fi
 
+# Desktop Environment selection
 echo "Choose Desktop Environment:"
 echo "1) GNOME (default)"
 echo "2) KDE Plasma"
 echo "3) Cinnamon"
 read -p "Enter choice (1-3): " de_choice
-
 case $de_choice in
   2) de_group="@kde-desktop";;
   3) de_group="@cinnamon-desktop";;
   *) de_group="@gnome-desktop";;
 esac
 
+# Encryption questions
+read -p "Do you want encrypted root? (yes/no): " root_enc
+root_enc=$(echo "$root_enc" | tr '[:upper:]' '[:lower:]')
+
+read -p "Do you want encrypted swap? (yes/no): " swap_enc
+swap_enc=$(echo "$swap_enc" | tr '[:upper:]' '[:lower:]')
+
 if [[ "$wipe_answer" == "yes" ]]; then
-  echo "IMPORTANT: This will ERASE ALL DATA on $disk."
+  echo "WARNING: This will ERASE ALL DATA on $disk."
   read -p "Type YES to confirm disk wipe and continue: " confirm
   if [[ "$confirm" != "YES" ]]; then
     echo "Aborted by user."
@@ -75,29 +84,32 @@ if [[ "$wipe_answer" == "yes" ]]; then
 
   echo "Wiping partition table on $disk..."
   wipefs -a "$disk"
-  dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync
+  dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync status=progress
 
-  # Gather sector info
   sector_size=$(cat /sys/block/$(basename $disk)/queue/hw_sector_size)
   total_sectors=$(blockdev --getsz "$disk")
 
-  echo "Disk sector size: $sector_size bytes"
-  echo "Disk total sectors: $total_sectors"
-
   efi_size_mib=512
+  boot_size_mib=512
   efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
+  boot_size_sectors=$(( (boot_size_mib * 1024 * 1024) / sector_size ))
   swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
 
-  # Start sectors
-  # 2048 is a common first partition start (1MiB aligned)
-  efi_start=2048
+  start=2048
 
   if [ "$fw_type" == "uefi" ]; then
+    efi_start=$start
     efi_end=$((efi_start + efi_size_sectors - 1))
-    root_start=$((efi_end + 1))
+
+    boot_start=$((efi_end + 1))
+    boot_end=$((boot_start + boot_size_sectors - 1))
+
+    root_start=$((boot_end + 1))
   else
-    # Legacy BIOS - no EFI partition
-    root_start=2048
+    boot_start=$start
+    boot_end=$((boot_start + boot_size_sectors - 1))
+
+    root_start=$((boot_end + 1))
   fi
 
   if [ "$swap_size_mib" -gt 0 ]; then
@@ -110,38 +122,45 @@ if [[ "$wipe_answer" == "yes" ]]; then
     swap_end=0
   fi
 
+  echo "Creating partition table and partitions..."
   if [ "$fw_type" == "uefi" ]; then
-    echo "Creating GPT partition table and partitions for UEFI boot..."
     parted --script "$disk" mklabel gpt
     parted --script "$disk" mkpart ESP fat32 "${efi_start}s" "${efi_end}s"
     parted --script "$disk" set 1 boot on
-    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
-    if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "-1s"
-    fi
 
-    efi_part="${disk}p1"
-    root_part="${disk}p2"
-    if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p3"
-    else
-      swap_part=""
-    fi
+    parted --script "$disk" mkpart primary ext4 "${boot_start}s" "${boot_end}s"
 
-  else
-    echo "Creating MBR partition table and partitions for Legacy BIOS boot..."
-    parted --script "$disk" mklabel msdos
-    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
-    parted --script "$disk" set 1 boot on
+    parted --script "$disk" mkpart primary  ext4 "${root_start}s" "${root_end}s"
+
     if [ "$swap_size_mib" -gt 0 ]; then
       parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
     fi
 
-    root_part="${disk}p1"
+    efi_part="${disk}p1"
+    boot_part="${disk}p2"
+    root_raw_part="${disk}p3"
     if [ "$swap_size_mib" -gt 0 ]; then
-      swap_part="${disk}p2"
+      swap_raw_part="${disk}p4"
     else
-      swap_part=""
+      swap_raw_part=""
+    fi
+  else
+    parted --script "$disk" mklabel msdos
+    parted --script "$disk" mkpart primary ext4 "${boot_start}s" "${boot_end}s"
+    parted --script "$disk" set 1 boot on
+
+    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
+
+    if [ "$swap_size_mib" -gt 0 ]; then
+      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
+    fi
+
+    boot_part="${disk}p1"
+    root_raw_part="${disk}p2"
+    if [ "$swap_size_mib" -gt 0 ]; then
+      swap_raw_part="${disk}p3"
+    else
+      swap_raw_part=""
     fi
   fi
 
@@ -149,22 +168,49 @@ if [[ "$wipe_answer" == "yes" ]]; then
   if [ "$fw_type" == "uefi" ]; then
     mkfs.fat -F32 "$efi_part"
   fi
-  mkfs.ext4 "$root_part"
 
-  if [ -n "$swap_part" ]; then
-    mkswap "$swap_part"
-    swapon "$swap_part"
+  mkfs.ext4 "$boot_part"
+
+  if [[ "$root_enc" == "yes" ]]; then
+    echo "Setting up LUKS encryption for root partition $root_raw_part..."
+    cryptsetup luksFormat "$root_raw_part"
+    cryptsetup luksOpen "$root_raw_part" cryptroot
+    root_part="/dev/mapper/cryptroot"
+    mkfs.ext4 "$root_part"
+  else
+    root_part="$root_raw_part"
+    mkfs.ext4 "$root_part"
+  fi
+
+  if [ "$swap_size_mib" -gt 0 ]; then
+    if [[ "$swap_enc" == "yes" ]]; then
+      echo "Setting up LUKS encryption for swap partition $swap_raw_part..."
+      cryptsetup luksFormat "$swap_raw_part"
+      cryptsetup luksOpen "$swap_raw_part" cryptswap
+      swap_part="/dev/mapper/cryptswap"
+      mkswap "$swap_part"
+      swapon "$swap_part"
+    else
+      swap_part="$swap_raw_part"
+      mkswap "$swap_part"
+      swapon "$swap_part"
+    fi
+  else
+    swap_part=""
   fi
 
   echo "Mounting partitions..."
   mount "$root_part" /mnt
+  mkdir -p /mnt/boot
+  mount "$boot_part" /mnt/boot
   if [ "$fw_type" == "uefi" ]; then
     mkdir -p /mnt/boot/efi
     mount "$efi_part" /mnt/boot/efi
   fi
 
 else
-  echo "You chose NOT to wipe or auto-partition. Please specify your existing partitions."
+  echo "Manual partitioning selected."
+  echo "Note: For easier partitioning, you can use the GUI tool 'GParted' in a live environment."
 
   if [ "$fw_type" == "uefi" ]; then
     read -p "Enter EFI system partition (e.g. /dev/sda1): " efi_part
@@ -172,21 +218,50 @@ else
     efi_part=""
   fi
 
-  read -p "Enter root partition (e.g. /dev/sda2): " root_part
-  read -p "Enter swap partition (e.g. /dev/sda3) or leave blank if none: " swap_part
+  read -p "Enter unencrypted /boot partition (e.g. /dev/sda2): " boot_part
 
-  # Validate partitions exist
-  for part in $efi_part $root_part $swap_part; do
+  read -p "Is your root partition encrypted? (yes/no): " root_enc
+  root_enc=$(echo "$root_enc" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$root_enc" == "yes" ]]; then
+    read -p "Enter raw encrypted root partition (e.g. /dev/sda3): " root_raw_part
+    echo "Opening encrypted root partition $root_raw_part..."
+    cryptsetup luksOpen "$root_raw_part" cryptroot
+    root_part="/dev/mapper/cryptroot"
+  else
+    read -p "Enter root partition (e.g. /dev/sda3): " root_part
+  fi
+
+  read -p "Is your swap partition encrypted? (yes/no): " swap_enc
+  swap_enc=$(echo "$swap_enc" | tr '[:upper:]' '[:lower:]')
+
+  if [[ "$swap_enc" == "yes" ]]; then
+    read -p "Enter raw encrypted swap partition (e.g. /dev/sda4): " swap_raw_part
+    echo "Opening encrypted swap partition $swap_raw_part..."
+    cryptsetup luksOpen "$swap_raw_part" cryptswap
+    swap_part="/dev/mapper/cryptswap"
+    mkswap "$swap_part"
+    swapon "$swap_part"
+  else
+    read -p "Enter swap partition (e.g. /dev/sda4) or leave blank for none: " swap_part
+    if [ -n "$swap_part" ]; then
+      mkswap "$swap_part"
+      swapon "$swap_part"
+    fi
+  fi
+
+  # Validate partitions
+  for part in $efi_part $boot_part $root_part $swap_part; do
     if [ -n "$part" ] && [ ! -b "$part" ]; then
       echo "ERROR: Partition $part not found!"
       exit 1
     fi
   done
 
-  read -p "Do you want to format the root partition $root_part? (yes/no): " fmt_root
-  fmt_root=$(echo "$fmt_root" | tr '[:upper:]' '[:lower:]')
-  if [[ "$fmt_root" == "yes" ]]; then
-    mkfs.ext4 "$root_part"
+  read -p "Do you want to format the /boot partition $boot_part? (yes/no): " fmt_boot
+  fmt_boot=$(echo "$fmt_boot" | tr '[:upper:]' '[:lower:]')
+  if [[ "$fmt_boot" == "yes" ]]; then
+    mkfs.ext4 "$boot_part"
   fi
 
   if [ "$fw_type" == "uefi" ] && [ -n "$efi_part" ]; then
@@ -197,34 +272,31 @@ else
     fi
   fi
 
-  if [ -n "$swap_part" ]; then
-    mkswap "$swap_part"
-    swapon "$swap_part"
+  read -p "Do you want to format the root partition $root_part? (yes/no): " fmt_root
+  fmt_root=$(echo "$fmt_root" | tr '[:upper:]' '[:lower:]')
+  if [[ "$fmt_root" == "yes" ]]; then
+    mkfs.ext4 "$root_part"
   fi
 
-  echo "Mounting root partition $root_part to /mnt..."
+  echo "Mounting partitions..."
   mount "$root_part" /mnt
+  mkdir -p /mnt/boot
+  mount "$boot_part" /mnt/boot
   if [ "$fw_type" == "uefi" ] && [ -n "$efi_part" ]; then
-    echo "Mounting EFI partition $efi_part to /mnt/boot/efi..."
     mkdir -p /mnt/boot/efi
     mount "$efi_part" /mnt/boot/efi
   fi
 fi
 
-#Mounting special directories
-echo "Mounting necessary chroot directories..."
-sudo mkdir -p /mnt/sys /mnt/dev /mnt/run /mnt/proc /mnt/usr
-sudo mount --bind /sys /mnt/sys
-sudo mount --bind /dev /mnt/dev
-sudo mount --bind /proc /mnt/proc
-sudo mount --bind /run /mnt/run
-sudo mount --bind /usr /mnt/usr
+# Creat and mount special filesystems for chroot
+for fs in sys dev proc run; do
+  mkdir -p /mnt/$fs
+  mount --bind /$fs /mnt/$fs
+done
 
 echo "Installing Fedora minimal system with $de_group..."
 dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
 dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
-
-
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
@@ -236,38 +308,25 @@ else
 fi
 
 echo "Generating fstab..."
-genfstab -U /mnt >> /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
+genfstab -U /mnt > /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
 
+# Add crypttab if encrypted root or swap
+if [[ "$root_enc" == "yes" ]] || [[ "$swap_enc" == "yes" ]]; then
+  echo "Creating /etc/crypttab..."
+  {
+    [[ "$root_enc" == "yes" ]] && echo "cryptroot UUID=$(blkid -s UUID -o value $root_raw_part) none luks"
+    [[ "$swap_enc" == "yes" ]] && echo "cryptswap UUID=$(blkid -s UUID -o value $swap_raw_part) none luks"
+  } > /mnt/etc/crypttab
+fi
 
+# TODO: Add user creation, passwords, network config as needed here
 
-# --- Create user and lock root ---
-read -p "Enter username for the new user: " newuser
-while true; do
-  read -s -p "Enter password for $newuser: " userpass
-  echo
-  read -s -p "Confirm password for $newuser: " userpass2
-  echo
-  [ "$userpass" = "$userpass2" ] && break
-  echo "Passwords do not match, please try again."
-done
+# Optional: Close luks mappings opened during install (if any)
+if [[ "$root_enc" == "yes" ]]; then
+  cryptsetup luksClose cryptroot || true
+fi
+if [[ "$swap_enc" == "yes" ]]; then
+  cryptsetup luksClose cryptswap || true
+fi
 
-echo "Creating user $newuser with sudo privileges..."
-chroot /mnt /usr/sbin/useradd -m -G wheel -s /bin/bash "$newuser"
-echo "$newuser:$userpass" | chroot /mnt /usr/sbin/chpasswd
-
-echo "Enabling sudo for wheel group..."
-chroot /mnt /usr/bin/sed -i '/^# %wheel ALL=(ALL) ALL/s/^# //' /mnt/etc/sudoers || true
-
-echo "Set root password (will be locked afterward):"
-chroot /mnt /usr/bin/passwd root
-
-echo "Locking root account for security..."
-chroot /mnt /usr/sbin/usermod -L root
-chroot /mnt /usr/bin/passwd -l root
-
-# --- Cleanup ---
-umount /mnt/dev || true
-umount /mnt/proc || true
-umount /mnt/sys || true
-
-echo "Installation complete. You can now reboot and log in as $newuser."
+echo "Installation complete! Please reboot."

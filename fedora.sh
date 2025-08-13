@@ -7,40 +7,28 @@ cat <<'EOF'
 
 --- Manual Partitioning Instructions ---
 
-If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, follow these steps carefully:
+If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, please use the Fedora Live environment’s GUI tool:
 
-1. Boot Fedora Live environment (e.g., Fedora KDE Spin).
-2. Open a terminal and identify your disk with: lsblk
-3. Start parted on your disk (replace /dev/sdX accordingly):
-   sudo parted /dev/sdX
-4. Create a partition table:
-   - For UEFI systems (GPT): mklabel gpt
-   - For Legacy BIOS (MBR): mklabel msdos
-5. Create partitions:
-   For UEFI/GPT:
-     - EFI System Partition (FAT32, 512 MiB): mkpart primary fat32 2048s 1050623s
-       set 1 boot on
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 1050624s <root_end>
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
-   For Legacy BIOS/MBR:
-     - Root (ext4, rest of disk minus swap): mkpart primary ext4 2048s <root_end>
-       set 1 boot on
-     - Swap (linux-swap, optional): mkpart primary linux-swap <swap_start> -1s
-6. Exit parted: quit
-7. Format partitions:
-   - EFI (UEFI only): sudo mkfs.fat -F32 /dev/sdX1
-   - Root: sudo mkfs.ext4 /dev/sdX2 (or /dev/sdX1 for Legacy BIOS)
-   - Swap (if any): sudo mkswap /dev/sdX3 (or /dev/sdX2 for Legacy BIOS) && sudo swapon /dev/sdX3 (or /dev/sdX2)
-8. Mount partitions before installation:
-   sudo mount /dev/sdX2 /mnt (or /dev/sdX1 for Legacy BIOS)
-   sudo mkdir -p /mnt/boot/efi
-   sudo mount /dev/sdX1 /mnt/boot/efi  # UEFI only
+1. Boot into the Fedora Live environment (e.g., Fedora KDE or GNOME Spin).
+2. Launch **GParted** from the applications menu.
+3. Identify your target disk carefully.
+4. Using GParted:
+   - Create a new partition table (GPT for UEFI or MSDOS for Legacy BIOS).
+   - Create the following partitions:
+     * EFI System Partition (FAT32, 512 MiB) — required only for UEFI systems.
+     * Root partition (ext4) — your main system partition.
+     * Swap partition (linux-swap), optional.
+   - To use encryption:
+     * Set up LUKS encryption manually via the terminal or use another tool, as GParted itself does not directly create LUKS containers.
+     * Alternatively, create partitions here and encrypt them afterward in the terminal using `cryptsetup`.
+5. Apply all changes and close GParted.
 
-Proceed with the installation script after this setup.
+Once done, return to this script and enter the paths to these partitions when prompted.
 
 ---
 
 EOF
+
 
 read -p "Enter target disk to install on (e.g. /dev/sda): " disk
 if [ ! -b "$disk" ]; then

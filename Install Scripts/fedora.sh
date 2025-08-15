@@ -1,358 +1,126 @@
- #!/bin/bash
+#!/bin/bash
 set -e
 
-echo "== Fedora Installation Process =="
+# --- Pre-Check ---
+if [[ $EUID -ne 0 ]]; then
+   echo "This script must be run as root" 
+   exit 1
+fi
 
+# --- Disk Selection ---
+echo "Available disks:"
+lsblk -d -o NAME,SIZE,MODEL
+read -p "Enter target disk (e.g., /dev/sda): " disk
+
+# --- Optional: Wipe Disk ---
+read -p "Wipe the disk? This will destroy all data on $disk (y/N): " wipe_disk
+if [[ "$wipe_disk" =~ ^[Yy]$ ]]; then
+    wipefs -a $disk
+    sgdisk --zap-all $disk
+fi
+
+# --- Partitioning Instructions ---
 cat <<'EOF'
 
 --- Manual Partitioning Instructions ---
 
-If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, please use the Fedora Live environment’s GUI tool:
+If you prefer to manually partition your drive instead of wiping and auto-partitioning with this script, please use a live environment (e.g., Void Linux ISO):
 
-1. Boot into the Fedora Live environment (e.g., Fedora KDE or GNOME Spin).
-2. Launch **GParted** from the applications menu.
-3. Identify your target disk carefully.
-4. Using GParted:
-   - Create a new partition table (GPT for UEFI or MSDOS for Legacy BIOS).
-   - Create the following partitions:
-     * EFI System Partition (FAT32, 512 MiB) — required only for UEFI systems.
-     * Root partition (ext4) — your main system partition.
-     * Swap partition (linux-swap), optional.
-   - To use encryption:
-     * Set up LUKS encryption manually via the terminal or use another tool, as GParted itself does not directly create LUKS containers.
-     * Alternatively, create partitions here and encrypt them afterward in the terminal using `cryptsetup`.
-5. Apply all changes and close GParted.
+1. Boot into the live environment.
+2. Update xbps by doing sudo xbps-install -S xbps and sudo xbps-install -Syu
+3. Then get cgdisk by installing gptfdisk (sudo xbps-install -S gptfdisk)
+4. Use cgdisk to partition the disk
 
-Once done, return to this script and enter the paths to these partitions when prompted.
-
+Note: Void Linux does not include a GUI by default. You can install a desktop environment later using `xbps-install`.
 ---
-
 EOF
 
+# --- Partition Mounting ---
+read -p "Enter root partition (e.g., /dev/sda2): " root_part
+read -p "Enter boot partition (or leave blank if none): " boot_part
+read -p "Enter EFI partition (or leave blank if none): " efi_part
 
-# Prompt for disk
-read -p "Enter target disk to install on (e.g. /dev/sda): " disk
-if [ ! -b "$disk" ]; then
-  echo "ERROR: Disk $disk not found!"
-  exit 1
-fi
-
-# Wipe and auto partition?
-read -p "Do you want to wipe and auto-partition the disk? (yes/no): " wipe_answer
-wipe_answer=$(echo "$wipe_answer" | tr '[:upper:]' '[:lower:]')
-
-# Firmware type (UEFI or LegacyBIOS)
-read -p "Enter firmware type (UEFI or LegacyBIOS): " fw_type
-fw_type=$(echo "$fw_type" | tr '[:upper:]' '[:lower:]')
-if [[ "$fw_type" != "uefi" && "$fw_type" != "legacybios" ]]; then
-  echo "Invalid firmware type. Please enter UEFI or LegacyBIOS."
-  exit 1
-fi
-
-# Desktop Environment selection
-echo "Choose Desktop Environment:"
-echo "1) GNOME (default)"
-echo "2) KDE Plasma"
-echo "3) Cinnamon"
-read -p "Enter choice (1-3): " de_choice
-case $de_choice in
-  2) de_group="@kde-desktop";;
-  3) de_group="@cinnamon-desktop";;
-  *) de_group="@gnome-desktop";;
-esac
-
-# Encryption questions
-read -p "Do you want encrypted root? (yes/no): " root_enc
-root_enc=$(echo "$root_enc" | tr '[:upper:]' '[:lower:]')
-
-read -p "Do you want encrypted swap? (yes/no): " swap_enc
-swap_enc=$(echo "$swap_enc" | tr '[:upper:]' '[:lower:]')
-
-if [[ "$wipe_answer" == "yes" ]]; then
-  echo "WARNING: This will ERASE ALL DATA on $disk."
-  read -p "Type YES to confirm disk wipe and continue: " confirm
-  if [[ "$confirm" != "YES" ]]; then
-    echo "Aborted by user."
-    exit 1
-  fi
-
-  read -p "Enter desired swap size in MiB (0 for no swap): " swap_size_mib
-  if ! [[ "$swap_size_mib" =~ ^[0-9]+$ ]]; then
-    echo "Invalid swap size entered."
-    exit 1
-  fi
-
-  echo "Wiping partition table on $disk..."
-  wipefs -a "$disk"
-  dd if=/dev/zero of="$disk" bs=1M count=10 conv=fdatasync status=progress
-
-  sector_size=$(cat /sys/block/$(basename $disk)/queue/hw_sector_size)
-  total_sectors=$(blockdev --getsz "$disk")
-
-  efi_size_mib=512
-  boot_size_mib=512
-  efi_size_sectors=$(( (efi_size_mib * 1024 * 1024) / sector_size ))
-  boot_size_sectors=$(( (boot_size_mib * 1024 * 1024) / sector_size ))
-  swap_size_sectors=$(( (swap_size_mib * 1024 * 1024) / sector_size ))
-
-  start=2048
-
-  if [ "$fw_type" == "uefi" ]; then
-    efi_start=$start
-    efi_end=$((efi_start + efi_size_sectors - 1))
-
-    boot_start=$((efi_end + 1))
-    boot_end=$((boot_start + boot_size_sectors - 1))
-
-    root_start=$((boot_end + 1))
-  else
-    boot_start=$start
-    boot_end=$((boot_start + boot_size_sectors - 1))
-
-    root_start=$((boot_end + 1))
-  fi
-
-  if [ "$swap_size_mib" -gt 0 ]; then
-    root_end=$((total_sectors - swap_size_sectors - 1))
-    swap_start=$((root_end + 1))
-    swap_end=$((total_sectors - 1))
-  else
-    root_end=$((total_sectors - 1))
-    swap_start=0
-    swap_end=0
-  fi
-
-  echo "Creating partition table and partitions..."
-  if [ "$fw_type" == "uefi" ]; then
-    parted --script "$disk" mklabel gpt
-    parted --script "$disk" mkpart ESP fat32 "${efi_start}s" "${efi_end}s"
-    parted --script "$disk" set 1 boot on
-
-    parted --script "$disk" mkpart primary ext4 "${boot_start}s" "${boot_end}s"
-
-    parted --script "$disk" mkpart primary  ext4 "${root_start}s" "${root_end}s"
-
-    if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
-    fi
-
-    efi_part="${disk}p1"
-    boot_part="${disk}p2"
-    root_raw_part="${disk}p3"
-    if [ "$swap_size_mib" -gt 0 ]; then
-      swap_raw_part="${disk}p4"
-    else
-      swap_raw_part=""
-    fi
-  else
-    parted --script "$disk" mklabel msdos
-    parted --script "$disk" mkpart primary ext4 "${boot_start}s" "${boot_end}s"
-    parted --script "$disk" set 1 boot on
-
-    parted --script "$disk" mkpart primary ext4 "${root_start}s" "${root_end}s"
-
-    if [ "$swap_size_mib" -gt 0 ]; then
-      parted --script "$disk" mkpart primary linux-swap "${swap_start}s" "${swap_end}s"
-    fi
-
-    boot_part="${disk}p1"
-    root_raw_part="${disk}p2"
-    if [ "$swap_size_mib" -gt 0 ]; then
-      swap_raw_part="${disk}p3"
-    else
-      swap_raw_part=""
-    fi
-  fi
-
-  echo "Formatting partitions..."
-  if [ "$fw_type" == "uefi" ]; then
-    mkfs.fat -F32 "$efi_part"
-  fi
-
-  mkfs.ext4 "$boot_part"
-
-  if [[ "$root_enc" == "yes" ]]; then
-    echo "Setting up LUKS encryption for root partition $root_raw_part..."
-    cryptsetup luksFormat "$root_raw_part"
-    cryptsetup luksOpen "$root_raw_part" cryptroot
-    root_part="/dev/mapper/cryptroot"
-    mkfs.ext4 "$root_part"
-  else
-    root_part="$root_raw_part"
-    mkfs.ext4 "$root_part"
-  fi
-
-  if [ "$swap_size_mib" -gt 0 ]; then
-    if [[ "$swap_enc" == "yes" ]]; then
-      echo "Setting up LUKS encryption for swap partition $swap_raw_part..."
-      cryptsetup luksFormat "$swap_raw_part"
-      cryptsetup luksOpen "$swap_raw_part" cryptswap
-      swap_part="/dev/mapper/cryptswap"
-      mkswap "$swap_part"
-      swapon "$swap_part"
-    else
-      swap_part="$swap_raw_part"
-      mkswap "$swap_part"
-      swapon "$swap_part"
-    fi
-  else
-    swap_part=""
-  fi
-
-  echo "Mounting partitions..."
-  mount "$root_part" /mnt
-  mkdir -p /mnt/boot
-  mount "$boot_part" /mnt/boot
-  if [ "$fw_type" == "uefi" ]; then
-    mkdir -p /mnt/boot/efi
-    mount "$efi_part" /mnt/boot/efi
-  fi
-
+# --- Optional LUKS encryption ---
+read -p "Do you want to encrypt root partition with LUKS? (y/N): " encrypt_choice
+if [[ "$encrypt_choice" =~ ^[Yy]$ ]]; then
+    read -s -p "Enter LUKS passphrase: " luks_pass
+    echo
+    cryptsetup luksFormat "$root_part" <<<"$luks_pass"
+    cryptsetup open "$root_part" cryptroot <<<"$luks_pass"
+    root_dev="/dev/mapper/cryptroot"
 else
-  echo "Manual partitioning selected."
-  echo "Note: For easier partitioning, you can use the GUI tool 'GParted' in a live environment."
+    root_dev="$root_part"
+fi
 
-  if [ "$fw_type" == "uefi" ]; then
-    read -p "Enter EFI system partition (e.g. /dev/sda1): " efi_part
-  else
-    efi_part=""
-  fi
+# --- Format Partitions ---
+mkfs.ext4 "$root_dev"
+mount "$root_dev" /mnt
 
-  read -p "Enter unencrypted /boot partition (e.g. /dev/sda2): " boot_part
-
-  read -p "Is your root partition encrypted? (yes/no): " root_enc
-  root_enc=$(echo "$root_enc" | tr '[:upper:]' '[:lower:]')
-
-  if [[ "$root_enc" == "yes" ]]; then
-    read -p "Enter raw encrypted root partition (e.g. /dev/sda3): " root_raw_part
-    echo "Opening encrypted root partition $root_raw_part..."
-    cryptsetup luksOpen "$root_raw_part" cryptroot
-    root_part="/dev/mapper/cryptroot"
-  else
-    read -p "Enter root partition (e.g. /dev/sda3): " root_part
-  fi
-
-  read -p "Is your swap partition encrypted? (yes/no): " swap_enc
-  swap_enc=$(echo "$swap_enc" | tr '[:upper:]' '[:lower:]')
-
-  if [[ "$swap_enc" == "yes" ]]; then
-    read -p "Enter raw encrypted swap partition (e.g. /dev/sda4): " swap_raw_part
-    echo "Opening encrypted swap partition $swap_raw_part..."
-    cryptsetup luksOpen "$swap_raw_part" cryptswap
-    swap_part="/dev/mapper/cryptswap"
-    mkswap "$swap_part"
-    swapon "$swap_part"
-  else
-    read -p "Enter swap partition (e.g. /dev/sda4) or leave blank for none: " swap_part
-    if [ -n "$swap_part" ]; then
-      mkswap "$swap_part"
-      swapon "$swap_part"
-    fi
-  fi
-
-  # Validate partitions
-  for part in $efi_part $boot_part $root_part $swap_part; do
-    if [ -n "$part" ] && [ ! -b "$part" ]; then
-      echo "ERROR: Partition $part not found!"
-      exit 1
-    fi
-  done
-
-  read -p "Do you want to format the /boot partition $boot_part? (yes/no): " fmt_boot
-  fmt_boot=$(echo "$fmt_boot" | tr '[:upper:]' '[:lower:]')
-  if [[ "$fmt_boot" == "yes" ]]; then
+if [[ -n "$boot_part" ]]; then
     mkfs.ext4 "$boot_part"
-  fi
+    mkdir -p /mnt/boot
+    mount "$boot_part" /mnt/boot
+fi
 
-  if [ "$fw_type" == "uefi" ] && [ -n "$efi_part" ]; then
-    read -p "Do you want to format the EFI partition $efi_part? (yes/no): " fmt_efi
-    fmt_efi=$(echo "$fmt_efi" | tr '[:upper:]' '[:lower:]')
-    if [[ "$fmt_efi" == "yes" ]]; then
-      mkfs.fat -F32 "$efi_part"
-    fi
-  fi
-
-  read -p "Do you want to format the root partition $root_part? (yes/no): " fmt_root
-  fmt_root=$(echo "$fmt_root" | tr '[:upper:]' '[:lower:]')
-  if [[ "$fmt_root" == "yes" ]]; then
-    mkfs.ext4 "$root_part"
-  fi
-
-  echo "Mounting partitions..."
-  mount "$root_part" /mnt
-  mkdir -p /mnt/boot
-  mount "$boot_part" /mnt/boot
-  if [ "$fw_type" == "uefi" ] && [ -n "$efi_part" ]; then
+if [[ -n "$efi_part" ]]; then
+    mkfs.fat -F32 "$efi_part"
     mkdir -p /mnt/boot/efi
     mount "$efi_part" /mnt/boot/efi
-  fi
 fi
 
-# Creat and mount special filesystems for chroot
-for fs in sys dev proc run; do
-  mkdir -p /mnt/$fs
-  mount --bind /$fs /mnt/$fs
-done
+# --- Base System Installation ---
+xbps-install -Sy -R https://alpha.de.repo.voidlinux.org/current -r /mnt base-system grub cryptsetup
 
-echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y \
-  @core "$de_group" $([ "$fw_type" == "uefi" ] && echo "grub2-efi-amd64-signed grub2-efi-modules shim efibootmgr" || echo "grub2 grub2-tools")
+# --- Generate fstab manually (Void doesn't have genfstab) ---
+mkdir -p /mnt/etc
+cat <<FSTAB_EOF > /mnt/etc/fstab
+$(blkid -o export "$root_dev" | awk -F= '/UUID/ {print "UUID="$2" / ext4 defaults 0 1"}')
+FSTAB_EOF
 
-echo "Installing bootloader..."
-if [ "$fw_type" == "uefi" ]; then
-  chroot /mnt grub2-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=fedora --recheck
-  chroot /mnt grub2-mkconfig -o /boot/efi/EFI/fedora/grub.cfg
+[[ -n "$boot_part" ]] && echo "$(blkid -o export "$boot_part" | awk -F= '/UUID/ {print "UUID="$2" /boot ext4 defaults 0 2"}')" >> /mnt/etc/fstab
+[[ -n "$efi_part" ]] && echo "$(blkid -o export "$efi_part" | awk -F= '/UUID/ {print "UUID="$2" /boot/efi vfat defaults 0 2"}')" >> /mnt/etc/fstab
+
+# --- Chroot Configuration ---
+mount --bind /dev /mnt/dev
+mount --bind /proc /mnt/proc
+mount --bind /sys /mnt/sys
+
+chroot /mnt /bin/bash <<'CHROOT_EOF'
+# --- Hostname ---
+read -p "Enter desired hostname for your system: " hostname
+echo "$hostname" > /etc/hostname
+cat <<HOSTS_EOF > /etc/hosts
+127.0.0.1   localhost
+::1         localhost
+127.0.1.1   $hostname.localdomain $hostname
+HOSTS_EOF
+
+# --- Root Password ---
+echo "Set root password:"
+passwd
+
+# --- LUKS initramfs ---
+if [ -e /dev/mapper/cryptroot ]; then
+    dracut -f
+fi
+
+# --- GRUB Installation ---
+if [ -d /sys/firmware/efi ]; then
+    grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=VoidLinux
 else
-  chroot /mnt grub2-install --target=i386-pc "$disk"
-  chroot /mnt grub2-mkconfig -o /boot/grub2/grub.cfg
+    read -p "Enter the disk for GRUB installation (e.g., /dev/sda): " grub_disk
+    grub-install --target=i386-pc "$grub_disk"
 fi
 
-echo "Generating fstab..."
-genfstab -U /mnt > /mnt/etc/fstab || { echo "ERROR: fstab generation failed."; exit 1; }
-
-# Add crypttab if encrypted root or swap
-if [[ "$root_enc" == "yes" ]] || [[ "$swap_enc" == "yes" ]]; then
-  echo "Creating /etc/crypttab..."
-  {
-    [[ "$root_enc" == "yes" ]] && echo "cryptroot UUID=$(blkid -s UUID -o value $root_raw_part) none luks"
-    [[ "$swap_enc" == "yes" ]] && echo "cryptswap UUID=$(blkid -s UUID -o value $swap_raw_part) none luks"
-  } > /mnt/etc/crypttab
+# --- GRUB config for LUKS ---
+if [ -e /dev/mapper/cryptroot ]; then
+    root_uuid=$(blkid -s UUID -o value /dev/sda2)
+    sed -i "s|GRUB_CMDLINE_LINUX=\"\"|GRUB_CMDLINE_LINUX=\"cryptdevice=UUID=$root_uuid:cryptroot root=/dev/mapper/cryptroot\"|" /etc/default/grub
 fi
 
-echo "=== User Setup ==="
-read -p "Enter username for the new user: " new_user
+grub-mkconfig -o /boot/grub/grub.cfg
+CHROOT_EOF
 
-while true; do
-  read -s -p "Enter password for $new_user: " user_password
-  echo
-  read -s -p "Confirm password: " user_password_confirm
-  echo
-
-  if [ "$user_password" != "$user_password_confirm" ]; then
-    echo "ERROR: Passwords do not match. Please try again."
-  elif [ -z "$user_password" ]; then
-    echo "ERROR: Password cannot be empty. Please try again."
-  else
-    break
-  fi
-done
-
-
-# Create user inside chroot
-chroot /mnt useradd -m -G wheel "$new_user"
-echo "$new_user:$user_password" | chroot /mnt chpasswd
-
-# Lock root account
-chroot /mnt passwd -l root
-
-echo "User $new_user created and root account locked."
-
-# Optional: Close luks mappings opened during install (if any)
-if [[ "$root_enc" == "yes" ]]; then
-  cryptsetup luksClose cryptroot || true
-fi
-if [[ "$swap_enc" == "yes" ]]; then
-  cryptsetup luksClose cryptswap || true
-fi
-
-echo "Installation complete! Please reboot."
+# --- Finish ---
+umount -R /mnt
+echo "Installation complete! Reboot into your new Void Linux system."

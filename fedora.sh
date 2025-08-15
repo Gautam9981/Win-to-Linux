@@ -296,7 +296,7 @@ done
 
 echo "Installing Fedora minimal system with $de_group..."
 dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False --use-host-config -y \
-  @core "$de_group" $([ "$fw_type" == "uefi" ] && echo "grub2-efi-x64 grub2-efi-modules shim efibootmgr" || echo "grub2 grub2-tools")
+  @core "$de_group" $([ "$fw_type" == "uefi" ] && echo "grub2-efi-amd64-signed grub2-efi-modules shim efibootmgr" || echo "grub2 grub2-tools")
 
 echo "Installing bootloader..."
 if [ "$fw_type" == "uefi" ]; then
@@ -320,6 +320,8 @@ if [[ "$root_enc" == "yes" ]] || [[ "$swap_enc" == "yes" ]]; then
 fi
 
 echo "=== User Setup ==="
+read -p "Enter username for the new user: " new_user
+
 while true; do
   read -s -p "Enter password for $new_user: " user_password
   echo

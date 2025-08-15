@@ -295,7 +295,7 @@ for fs in sys dev proc run; do
 done
 
 echo "Installing Fedora minimal system with $de_group..."
-dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi shim efibootmgr || \
+dnf install --installroot=/mnt --releasever=42 --setopt=install_weak_deps=False -y @core $de_group grub2-efi-x64 grub2-efi-modules shim efibootmgr || \
 dnf install --installroot=/mnt --releasever=42 -y @core $de_group grub2
 
 echo "Installing bootloader..."

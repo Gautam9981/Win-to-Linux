@@ -319,7 +319,32 @@ if [[ "$root_enc" == "yes" ]] || [[ "$swap_enc" == "yes" ]]; then
   } > /mnt/etc/crypttab
 fi
 
-# TODO: Add user creation, passwords, network config as needed here
+echo "== User Setup =="
+
+read -p "Enter new username: " new_user
+while ! [[ "$new_user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; do
+  echo "Invalid username. Try again."
+  read -p "Enter new username: " new_user
+done
+
+read -s -p "Enter password for $new_user: " user_password
+echo
+read -s -p "Confirm password: " user_password_confirm
+echo
+
+if [ "$user_password" != "$user_password_confirm" ]; then
+  echo "ERROR: Passwords do not match."
+  exit 1
+fi
+
+# Create user inside chroot
+chroot /mnt useradd -m -G wheel "$new_user"
+echo "$new_user:$user_password" | chroot /mnt chpasswd
+
+# Lock root account
+chroot /mnt passwd -l root
+
+echo "User $new_user created and root account locked."
 
 # Optional: Close luks mappings opened during install (if any)
 if [[ "$root_enc" == "yes" ]]; then

@@ -319,23 +319,22 @@ if [[ "$root_enc" == "yes" ]] || [[ "$swap_enc" == "yes" ]]; then
   } > /mnt/etc/crypttab
 fi
 
-echo "== User Setup =="
+echo "=== User Setup ==="
+while true; do
+  read -s -p "Enter password for $new_user: " user_password
+  echo
+  read -s -p "Confirm password: " user_password_confirm
+  echo
 
-read -p "Enter new username: " new_user
-while ! [[ "$new_user" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; do
-  echo "Invalid username. Try again."
-  read -p "Enter new username: " new_user
+  if [ "$user_password" != "$user_password_confirm" ]; then
+    echo "ERROR: Passwords do not match. Please try again."
+  elif [ -z "$user_password" ]; then
+    echo "ERROR: Password cannot be empty. Please try again."
+  else
+    break
+  fi
 done
 
-read -s -p "Enter password for $new_user: " user_password
-echo
-read -s -p "Confirm password: " user_password_confirm
-echo
-
-if [ "$user_password" != "$user_password_confirm" ]; then
-  echo "ERROR: Passwords do not match."
-  exit 1
-fi
 
 # Create user inside chroot
 chroot /mnt useradd -m -G wheel "$new_user"

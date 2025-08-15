@@ -1,24 +1,11 @@
 # unified.ps1
-# Ubuntu / Fedora / Mint / Void / Arch / Debian Prep Script for Grub2Win
+# Ubuntu / Fedora / Mint / Void / Arch / Debian Trixie Prep Script for Grub2Win
 # Run as Administrator
 
-# === Prompt user for firmware type manually ===
+# === Prompt firmware type ===
 Write-Host "Firmware type detection is disabled."
-Write-Host "Please enter firmware type manually (UEFI or LegacyBIOS):"
-while ($true) {
-    $firmwareTypeInput = Read-Host "Firmware Type"
-    if ($firmwareTypeInput -match "^(UEFI|LegacyBIOS)$") {
-        $firmwareType = $firmwareTypeInput
-        break
-    } else {
-        Write-Warning "Invalid input. Please enter exactly 'UEFI' or 'LegacyBIOS'."
-    }
-}
-
-if ($firmwareType -notin @("UEFI", "LegacyBIOS")) {
-    Write-Warning "Firmware detection uncertain. Defaulting to Legacy BIOS boot."
-    $firmwareType = "LegacyBIOS"
-}
+Write-Host "This script supports UEFI only."
+$firmwareType = "UEFI"
 
 # === Menu Selection ===
 Write-Host 'Select Distro:'
@@ -27,7 +14,7 @@ Write-Host '2) Fedora KDE 42-1.1'
 Write-Host '3) Linux Mint 22.1 Cinnamon'
 Write-Host '4) Void Linux (x86_64 glibc Base)'
 Write-Host '5) Arch Linux'
-Write-Host '6) Debian 13.0 Trixie Live GNOME'
+Write-Host '6) Debian 13.0 Trixie GNOME Live'
 $distroChoice = Read-Host 'Enter number'
 
 switch ($distroChoice) {
@@ -76,12 +63,12 @@ switch ($distroChoice) {
     default { Write-Error "Invalid selection."; exit 1 }
 }
 
-# === Prepare Variables ===
+# Uppercase label
 $labelUpper = $distro.ToUpper()
 $downloadsFolder = Join-Path $env:USERPROFILE "Downloads"
 $isoPath = Join-Path $downloadsFolder "$distro.iso"
 
-# === Download ISO Function ===
+# === Download Function ===
 function Download-ISO {
     param([string[]]$urls, [string]$outputPath)
     foreach ($url in $urls) {
@@ -93,121 +80,76 @@ function Download-ISO {
                 if ($size -gt 1GB) {
                     Write-Host "Download successful from $url"
                     return $true
-                } else {
-                    Write-Warning "Downloaded file too small (<1GB), trying next mirror..."
                 }
             }
         } catch {
             Write-Warning "Failed to download from $url"
         }
     }
-    Write-Error "All download attempts failed."
     return $false
 }
 
-# === Download ISO if Missing ===
+# === Download ISO if missing ===
 if (-not (Test-Path $isoPath)) {
-    if (-not (Download-ISO -urls $isoUrls -outputPath $isoPath)) { exit 1 }
+    if (-not (Download-ISO -urls $isoUrls -outputPath $isoPath)) {
+        Write-Error "All download attempts failed."
+        exit 1
+    }
 } else {
     Write-Host "ISO already exists at $isoPath"
 }
 
-# === Calculate ISO Partition Size ===
+# === Partition Sizing ===
 $isoSizeBytes = (Get-Item $isoPath).Length
 $isoSizeGB = [math]::Ceiling($isoSizeBytes / 1GB)
 $isoPartitionSizeGB = $isoSizeGB + 1
-Write-Host "Calculated ISO partition size: $isoPartitionSizeGB GB"
+Write-Host "Partition size: $isoPartitionSizeGB GB"
 
-# === Prompt for Linux Space ===
-while ($true) {
-    $linuxSpaceInput = Read-Host "Enter how many GB to shrink C: for Linux space (enter 0 to skip)"
-    if ([int]::TryParse($linuxSpaceInput, [ref]$null) -and [int]$linuxSpaceInput -ge 0) {
-        $linuxSpaceGB = [int]$linuxSpaceInput
-        break
-    } else {
-        Write-Warning "Invalid input. Please enter a non-negative integer."
-    }
-}
-
+$linuxSpaceGB = 0
 $totalShrinkGB = $linuxSpaceGB + $isoPartitionSizeGB
 $partitionSizeMB = $isoPartitionSizeGB * 1024
 
-# === Locate System Disk and C: Partition ===
+# === Get system disk ===
 $disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
-if (-not $disk) { Write-Error "System disk not found."; exit 1 }
 $cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
-if (-not $cPartition) { Write-Error "C: drive partition not found."; exit 1 }
 $volume = Get-Volume -DriveLetter 'C'
 
-# === Space Checks ===
 $totalShrinkBytes = $totalShrinkGB * 1GB
 if ($volume.SizeRemaining -lt $totalShrinkBytes) {
-    Write-Error "Not enough free space on C: to shrink by $totalShrinkGB GB."
+    Write-Error "Not enough free space."
     exit 1
 }
 
 $supportedSize = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $cPartition.PartitionNumber
 if ($supportedSize.SizeMax -lt $totalShrinkBytes) {
-    Write-Error "Maximum shrink size allowed: $([math]::Round($supportedSize.SizeMax / 1GB)) GB, less than required $totalShrinkGB GB."
+    Write-Error "Shrink size exceeds limit."
     exit 1
 }
 
-# === Shrink C: Partition ===
-try {
-    Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkBytes) -ErrorAction Stop
-    Write-Host "C: partition shrunk by $totalShrinkGB GB successfully."
-} catch {
-    Write-Error "Failed to shrink C: drive. $_"
-    exit 1
-}
+# === Shrink C: ===
+Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkBytes)
+Write-Host "C: shrunk by $totalShrinkGB GB"
 
-# === Create ISO Partition ===
-Write-Host "Creating partition with label $labelUpper..."
+# === Create & Format Partition ===
 $part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
 $fileSystemType = if ($isoPartitionSizeGB -le 32) { "FAT32" } else { "NTFS" }
 Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
-if ($firmwareType -eq "LegacyBIOS") {
-    Set-Partition -PartitionNumber $part.PartitionNumber -DiskNumber $disk.Number -IsActive $true
-    Write-Host "Legacy BIOS partition marked active."
-}
 
 $newDriveLetter = ($part | Get-Volume).DriveLetter
 $newDrive = "${newDriveLetter}:"
 
-# === Mount ISO ===
-try {
-    Write-Host "Mounting ISO..."
-    $diskImage = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
-    Start-Sleep -Seconds 3
-    $isoVolume = ($diskImage | Get-Volume)
-    $isoDriveLetter = $isoVolume.DriveLetter + ":"
-    Write-Host "ISO mounted as drive $isoDriveLetter"
-} catch {
-    Write-Error "Could not mount ISO."
-    exit 1
-}
-
-# === Copy ISO Contents ===
-Write-Host "Copying ISO contents to $newDrive..."
+# === Mount & Copy ISO ===
+$diskImage = Mount-DiskImage -ImagePath $isoPath -PassThru
+Start-Sleep -Seconds 3
+$isoDriveLetter = ($diskImage | Get-Volume).DriveLetter + ":"
 Copy-Item -Path "$isoDriveLetter\*" -Destination $newDrive -Recurse -Force
-
-# === Unmount ISO ===
-Write-Host "Unmounting ISO..."
 Dismount-DiskImage -ImagePath $isoPath
 
-# === Determine GRUB Root Partition ===
-$partitionStyle = $disk.PartitionStyle
-if ($firmwareType -eq "UEFI" -and $partitionStyle -eq "GPT") {
-    $rootPartition = "(hd0,gpt$($part.PartitionNumber))"
-} elseif ($firmwareType -eq "LegacyBIOS") {
-    $rootPartition = "(hd0,msdos$($part.PartitionNumber))"
-} else {
-    $rootPartition = "(hd0,msdos$($part.PartitionNumber))"
-}
-
+# === Root Partition for UEFI ===
+$rootPartition = "(hd0,gpt$($part.PartitionNumber))"
 $isoFileName = Split-Path $isoPath -Leaf
 
-# === Generate GRUB2WIN Entry ===
+# === GRUB2WIN Configs ===
 switch ($distro) {
     "ubuntu" {
         $grubCode = @"
@@ -257,7 +199,7 @@ initrd /live/initrd.img
 boot
 "@
         $manualDebianCode = @"
-# Manual Debian Live GRUB2Win config (fallback)
+# Manual Fallback - Debian 13.0 Trixie GNOME Live
 set root=$rootPartition
 linux /live/vmlinuz boot=live quiet splash
 initrd /live/initrd.img
@@ -266,7 +208,7 @@ boot
     }
 }
 
-# === Output GRUB2WIN Config ===
+# === Output Config ===
 Write-Host "Copy this GRUB2WIN menu entry:"
 Write-Host "-----------------------------------"
 Write-Host $grubCode

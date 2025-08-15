@@ -106,52 +106,110 @@ $isoPartitionSizeGB = $isoSizeGB + 1  # 1 GB buffer
 
 Write-Host ""
 $linuxSpaceGB = Read-Host "Enter extra space (GB) to leave unallocated for Linux installation (0 for none)"
-if (-not ($linuxSpaceGB -as [int])) { 
-    Write-Error "Invalid number."; exit 1 
+if (-not ($linuxSpaceGB -as [int])) {
+    Write-Error "Invalid number."; exit 1
+}
+if ([int]$linuxSpaceGB -lt 0) {
+    Write-Error "Linux space cannot be negative."; exit 1
 }
 
-$totalShrinkGB = $linuxSpaceGB + $isoPartitionSizeGB
-$partitionSizeMB = $isoPartitionSizeGB * 1024
+# Bytes (Int64/UInt64 safe)
+$isoPartitionSizeMB = [int64]$isoPartitionSizeGB * 1024
+$isoPartitionBytes  = [int64]$isoPartitionSizeMB * 1MB
+$totalShrinkGB      = [int64]$linuxSpaceGB + [int64]$isoPartitionSizeGB
+$totalShrinkBytes   = [int64]$totalShrinkGB * 1GB
 
 Write-Host "Partition for ISO: $isoPartitionSizeGB GB"
 Write-Host "Extra unallocated for Linux: $linuxSpaceGB GB"
-Write-Host "Total shrink from C: $totalShrinkGB GB"
+Write-Host "Total requested shrink from C: $totalShrinkGB GB"
 
-# === Get system disk ===
+# === Get system disk/vol ===
 $disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
-$cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
-$volume = Get-Volume -DriveLetter 'C'
+if (-not $disk) { Write-Error "Could not determine system disk."; exit 1 }
 
-$totalShrinkBytes = $totalShrinkGB * 1GB
-if ($volume.SizeRemaining -lt $totalShrinkBytes) {
-    Write-Error "Not enough free space."
+$cPartition = Get-Partition | Where-Object { $_.DriveLetter -eq 'C' }
+if (-not $cPartition) { Write-Error "Could not locate C: partition."; exit 1 }
+
+$volume = Get-Volume -DriveLetter 'C'
+if (-not $volume) { Write-Error "Could not get C: volume information."; exit 1 }
+
+# === Query max shrinkable size and clamp ===
+$supportedSize = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $cPartition.PartitionNumber
+$maxShrinkBytes = [int64]$supportedSize.SizeMax
+
+if ($maxShrinkBytes -le 0) {
+    Write-Error "Windows reports no shrinkable space on C:. Free up space (disable hibernation, pagefile, system restore) and try again."
     exit 1
 }
 
-$supportedSize = Get-PartitionSupportedSize -DiskNumber $disk.Number -PartitionNumber $cPartition.PartitionNumber
-if ($supportedSize.SizeMax -lt $totalShrinkBytes) {
-    Write-Error "Shrink size exceeds limit."
+# Clamp to max shrinkable
+if ($totalShrinkBytes -gt $maxShrinkBytes) {
+    Write-Warning "Requested shrink exceeds maximum allowed. Clamping to max shrinkable size."
+    $totalShrinkBytes = $maxShrinkBytes
+    $totalShrinkGB = [math]::Round($totalShrinkBytes / 1GB, 2)
+}
+
+# Must at least fit the ISO partition
+if ($totalShrinkBytes -lt $isoPartitionBytes) {
+    $maxGB = [math]::Round($maxShrinkBytes / 1GB, 2)
+    $isoGB = [math]::Round($isoPartitionBytes / 1GB, 2)
+    Write-Error "Insufficient shrinkable space. Max shrinkable: ${maxGB} GB, but ISO partition needs ${isoGB} GB. Reduce extra Linux space or free up disk space and retry."
+    exit 1
+}
+
+# Also verify current free space on C: is enough for the shrink operation
+if ([int64]$volume.SizeRemaining -lt $totalShrinkBytes) {
+    $needGB = [math]::Round($totalShrinkBytes / 1GB, 2)
+    $haveGB = [math]::Round($volume.SizeRemaining / 1GB, 2)
+    Write-Error "Not enough free space on C: to perform shrink. Need ${needGB} GB free, have ${haveGB} GB."
     exit 1
 }
 
 # === Shrink C: ===
-Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkBytes)
-Write-Host "C: shrunk by $totalShrinkGB GB"
+try {
+    $newSize = [uint64]($volume.Size - $totalShrinkBytes)
+    Resize-Partition -DriveLetter 'C' -Size $newSize -ErrorAction Stop
+    Write-Host "C: shrunk by $totalShrinkGB GB"
+}
+catch {
+    Write-Error "Resize-Partition failed: $($_.Exception.Message)"
+    exit 1
+}
 
 # === Create & Format ISO Partition ===
-$part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
+try {
+    $part = New-Partition -DiskNumber $disk.Number -Size ([uint64]$isoPartitionBytes) -AssignDriveLetter -ErrorAction Stop
+} catch {
+    Write-Error "New-Partition failed (no usable unallocated extent or alignment issue): $($_.Exception.Message)"
+    exit 1
+}
+
 $fileSystemType = if ($isoPartitionSizeGB -le 32) { "FAT32" } else { "NTFS" }
-Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
+try {
+    Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false -ErrorAction Stop
+} catch {
+    Write-Error "Format-Volume failed: $($_.Exception.Message)"
+    exit 1
+}
 
 $newDriveLetter = ($part | Get-Volume).DriveLetter
 $newDrive = "${newDriveLetter}:"
 
 # === Mount & Copy ISO ===
-$diskImage = Mount-DiskImage -ImagePath $isoPath -PassThru
-Start-Sleep -Seconds 3
-$isoDriveLetter = ($diskImage | Get-Volume).DriveLetter + ":"
-Copy-Item -Path "$isoDriveLetter\*" -Destination $newDrive -Recurse -Force
-Dismount-DiskImage -ImagePath $isoPath
+try {
+    $diskImage = Mount-DiskImage -ImagePath $isoPath -PassThru -ErrorAction Stop
+    Start-Sleep -Seconds 3
+    $isoVol = ($diskImage | Get-Volume | Select-Object -First 1)
+    if (-not $isoVol) { throw "Mounted ISO volume not found." }
+    $isoDriveLetter = $isoVol.DriveLetter + ":"
+    Copy-Item -Path "$isoDriveLetter\*" -Destination $newDrive -Recurse -Force -ErrorAction Stop
+} catch {
+    Write-Error "ISO copy failed: $($_.Exception.Message)"
+    try { Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue } catch {}
+    exit 1
+}
+# Always try to dismount
+try { Dismount-DiskImage -ImagePath $isoPath -ErrorAction SilentlyContinue } catch {}
 
 # === Root Partition for UEFI ===
 $rootPartition = "(hd0,gpt$($part.PartitionNumber))"

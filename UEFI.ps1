@@ -1,4 +1,4 @@
-# unified.ps1
+# UEFI.ps1
 # Ubuntu / Fedora / Mint / Void / Arch / Debian Trixie Prep Script for Grub2Win
 # Run as Administrator
 
@@ -102,12 +102,20 @@ if (-not (Test-Path $isoPath)) {
 # === Partition Sizing ===
 $isoSizeBytes = (Get-Item $isoPath).Length
 $isoSizeGB = [math]::Ceiling($isoSizeBytes / 1GB)
-$isoPartitionSizeGB = $isoSizeGB + 1
-Write-Host "Partition size: $isoPartitionSizeGB GB"
+$isoPartitionSizeGB = $isoSizeGB + 1  # 1 GB buffer
 
-$linuxSpaceGB = 0
+Write-Host ""
+$linuxSpaceGB = Read-Host "Enter extra space (GB) to leave unallocated for Linux installation (0 for none)"
+if (-not ($linuxSpaceGB -as [int])) { 
+    Write-Error "Invalid number."; exit 1 
+}
+
 $totalShrinkGB = $linuxSpaceGB + $isoPartitionSizeGB
 $partitionSizeMB = $isoPartitionSizeGB * 1024
+
+Write-Host "Partition for ISO: $isoPartitionSizeGB GB"
+Write-Host "Extra unallocated for Linux: $linuxSpaceGB GB"
+Write-Host "Total shrink from C: $totalShrinkGB GB"
 
 # === Get system disk ===
 $disk = Get-Disk | Where-Object { $_.IsSystem -and $_.OperationalStatus -eq 'Online' } | Select-Object -First 1
@@ -130,7 +138,7 @@ if ($supportedSize.SizeMax -lt $totalShrinkBytes) {
 Resize-Partition -DriveLetter 'C' -Size ($volume.Size - $totalShrinkBytes)
 Write-Host "C: shrunk by $totalShrinkGB GB"
 
-# === Create & Format Partition ===
+# === Create & Format ISO Partition ===
 $part = New-Partition -DiskNumber $disk.Number -Size ($partitionSizeMB * 1MB) -AssignDriveLetter
 $fileSystemType = if ($isoPartitionSizeGB -le 32) { "FAT32" } else { "NTFS" }
 Format-Volume -Partition $part -FileSystem $fileSystemType -NewFileSystemLabel $labelUpper -Confirm:$false
